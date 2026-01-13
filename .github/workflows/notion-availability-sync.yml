@@ -31,8 +31,8 @@ jobs:
       - name: Run Notion sync
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
-          SOURCE_TASK_DB_ID: ${{ secrets.SOURCE_TASK_DB_ID }}
-          TARGET_WEEKLY_DB_ID: ${{ secrets.TARGET_WEEKLY_DB_ID }}
+          SOURCE_DB_ID: ${{ secrets.SOURCE_DB_ID }}
+          TARGET_DB_ID: ${{ secrets.TARGET_DB_ID }}
           SYNC_LOOKBACK_DAYS: 45
         run: python notion_mirror_availability_sync.py
                                
