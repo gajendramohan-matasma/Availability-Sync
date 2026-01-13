@@ -29,12 +29,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install --no-cache-dir -r requirements.txt
 
-      - name: Validate entrypoint
-        run: |
-          set -euo pipefail
-          test -f src/main.py
-          python --version
-
       - name: Run Notion sync
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
