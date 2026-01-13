@@ -8,8 +8,9 @@ from tenacity import retry, wait_exponential, stop_after_attempt
 # ================= CONFIG =================
 HOURS_PER_DAY = 9
 
-PROP_REQUESTOR = "Requestor"          # MUST exactly match source DB
-PROP_ASSIGNED_TO = "Assigned To"
+# ---- Source / Target properties ----
+PROP_REQUESTOR = "Requestor"          # Source DB (People)
+PROP_ASSIGNED_TO = "Assigned To"      # Target DB (People)
 
 PROP_LEAVE_START = "Leave Start Date"
 PROP_LEAVE_END = "Leave End Date"
@@ -19,12 +20,15 @@ PROP_CLIENT_UNAVAIL = "Client Unavailability"
 PROP_PROJECTS = "Projects"
 PROP_WORKSTREAMS = "Impacted Workstreams"
 
+# ---- Target-only system properties ----
+PROP_TITLE = "Name"                   # 🔴 REQUIRED (Title column)
 PROP_SYNC_KEY = "Sync Key"
 PROP_ISO_WEEK = "ISO Week"
 PROP_LEAVE_DAYS = "Leave Days"
 PROP_LEAVE_HOURS = "Leave Hours"
 PROP_LAST_SYNCED = "Last Synced At"
 
+# ---- Environment ----
 NOTION_TOKEN = os.environ["NOTION_TOKEN"]
 SOURCE_DB_ID = os.environ["SOURCE_DB_ID"]
 TARGET_DB_ID = os.environ["TARGET_DB_ID"]
@@ -64,7 +68,10 @@ def query_db(db_id, **kwargs):
 
 @retry(wait=wait_exponential(1, 2, 30), stop=stop_after_attempt(5))
 def create_page(db_id, props):
-    return notion.pages.create(parent={"database_id": db_id}, properties=props)
+    return notion.pages.create(
+        parent={"database_id": db_id},
+        properties=props
+    )
 
 @retry(wait=wait_exponential(1, 2, 30), stop=stop_after_attempt(5))
 def update_page(page_id, props):
@@ -140,7 +147,7 @@ def main():
     for sp in source_pages:
         p = sp.get("properties", {})
 
-        # -------- SAFE REQUESTOR ACCESS (FIX) --------
+        # ---- Requestor (safe access) ----
         req = p.get(PROP_REQUESTOR)
         if not req or req.get("type") != "people":
             continue
@@ -148,8 +155,8 @@ def main():
         people = req.get("people", [])
         if not people:
             continue
-        # --------------------------------------------
 
+        # ---- Mandatory fields ----
         sd = p.get(PROP_LEAVE_START, {}).get("date")
         ed = p.get(PROP_LEAVE_END, {}).get("date")
         lt = p.get(PROP_LEAVE_TYPE, {}).get("select")
@@ -174,12 +181,21 @@ def main():
             weekly[wk] = weekly.get(wk, 0) + frac
 
         for wk, days in weekly.items():
+            title_text = f"{leave_type} | {wk}"
+
             props = {
+                # 🔴 REQUIRED TITLE
+                PROP_TITLE: {
+                    "title": [{"text": {"content": title_text}}]
+                },
+
                 PROP_ASSIGNED_TO: {"people": people},
                 PROP_LEAVE_START: {"date": {"start": start.isoformat()}},
                 PROP_LEAVE_END: {"date": {"start": end.isoformat()}},
                 PROP_LEAVE_TYPE: {"select": {"name": leave_type}},
-                PROP_CLIENT_UNAVAIL: {"select": p.get(PROP_CLIENT_UNAVAIL, {}).get("select")},
+                PROP_CLIENT_UNAVAIL: {
+                    "select": p.get(PROP_CLIENT_UNAVAIL, {}).get("select")
+                },
                 PROP_WORKSTREAMS: {
                     "multi_select": p.get(PROP_PROJECTS, {}).get("multi_select", [])
                 },
