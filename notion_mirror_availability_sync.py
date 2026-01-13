@@ -8,7 +8,7 @@ from tenacity import retry, wait_exponential, stop_after_attempt
 # ================= CONFIG =================
 HOURS_PER_DAY = 9
 
-PROP_REQUESTOR = "Requestor"
+PROP_REQUESTOR = "Requestor"          # MUST exactly match source DB
 PROP_ASSIGNED_TO = "Assigned To"
 
 PROP_LEAVE_START = "Leave Start Date"
@@ -90,23 +90,32 @@ def build_target_index():
     pages = get_all_pages(TARGET_DB_ID)
     idx = {}
     for p in pages:
-        key = p["properties"].get(PROP_SYNC_KEY, {}).get("rich_text", [])
-        if key:
-            idx[key[0]["plain_text"]] = p["id"]
+        rt = p["properties"].get(PROP_SYNC_KEY, {}).get("rich_text", [])
+        if rt:
+            idx[rt[0]["plain_text"]] = p["id"]
     return idx
 
 def last_sync_time():
-    pages = get_all_pages(
-        TARGET_DB_ID,
-        filter={"property": PROP_LAST_SYNCED, "date": {"is_not_empty": True}}
-    )
+    try:
+        pages = get_all_pages(
+            TARGET_DB_ID,
+            filter={
+                "property": PROP_LAST_SYNCED,
+                "date": {"is_not_empty": True}
+            }
+        )
+    except Exception:
+        return None
+
     if not pages:
         return None
+
     return max(
         datetime.fromisoformat(
             p["properties"][PROP_LAST_SYNCED]["date"]["start"]
         )
         for p in pages
+        if p["properties"].get(PROP_LAST_SYNCED, {}).get("date")
     )
 
 # ================= MAIN LOGIC =================
@@ -129,17 +138,30 @@ def main():
     now_iso = datetime.utcnow().isoformat()
 
     for sp in source_pages:
-        p = sp["properties"]
+        p = sp.get("properties", {})
 
-        people = p[PROP_REQUESTOR]["people"]
-        if not people:
+        # -------- SAFE REQUESTOR ACCESS (FIX) --------
+        req = p.get(PROP_REQUESTOR)
+        if not req or req.get("type") != "people":
             continue
 
-        requestor_ids = ",".join(u["id"] for u in people)
-        start = date.fromisoformat(p[PROP_LEAVE_START]["date"]["start"])
-        end = date.fromisoformat(p[PROP_LEAVE_END]["date"]["start"])
-        leave_type = p[PROP_LEAVE_TYPE]["select"]["name"]
+        people = req.get("people", [])
+        if not people:
+            continue
+        # --------------------------------------------
 
+        sd = p.get(PROP_LEAVE_START, {}).get("date")
+        ed = p.get(PROP_LEAVE_END, {}).get("date")
+        lt = p.get(PROP_LEAVE_TYPE, {}).get("select")
+
+        if not sd or not ed or not lt:
+            continue
+
+        start = date.fromisoformat(sd["start"])
+        end = date.fromisoformat(ed["start"])
+        leave_type = lt["name"]
+
+        requestor_ids = ",".join(u["id"] for u in people)
         sync_key = build_sync_key(requestor_ids, start, end, leave_type)
 
         weekly = {}
@@ -157,12 +179,12 @@ def main():
                 PROP_LEAVE_START: {"date": {"start": start.isoformat()}},
                 PROP_LEAVE_END: {"date": {"start": end.isoformat()}},
                 PROP_LEAVE_TYPE: {"select": {"name": leave_type}},
-                PROP_CLIENT_UNAVAIL: {"select": p[PROP_CLIENT_UNAVAIL]["select"]},
+                PROP_CLIENT_UNAVAIL: {"select": p.get(PROP_CLIENT_UNAVAIL, {}).get("select")},
                 PROP_WORKSTREAMS: {
-                    "multi_select": p[PROP_PROJECTS].get("multi_select", [])
+                    "multi_select": p.get(PROP_PROJECTS, {}).get("multi_select", [])
                 },
                 PROP_SYNC_KEY: {
-                    "rich_text": [{"text": {"content": sync_key + "|" + wk}}]
+                    "rich_text": [{"text": {"content": f"{sync_key}|{wk}"}}]
                 },
                 PROP_ISO_WEEK: {
                     "rich_text": [{"text": {"content": wk}}]
@@ -172,7 +194,7 @@ def main():
                 PROP_LAST_SYNCED: {"date": {"start": now_iso}},
             }
 
-            key = sync_key + "|" + wk
+            key = f"{sync_key}|{wk}"
             if key in target_index:
                 update_page(target_index[key], props)
                 updated += 1
