@@ -13,7 +13,7 @@ PROP_REQUESTOR = "Requestor"                 # Source DB (People)
 PROP_ASSIGNED_TO = "Assigned To"             # Target DB (People)
 
 PROP_LEAVE_START = "Leave Start Date"        # Date
-PROP_LEAVE_END = "Leave End Date"            # ⚠️ Formula
+PROP_LEAVE_END = "Leave End Date"            # Formula (Date)
 PROP_LEAVE_TYPE = "Leave Type"               # Select
 PROP_CLIENT_UNAVAIL = "Client Unavailability"  # Checkbox
 
@@ -57,6 +57,12 @@ def leave_fraction(leave_type: str):
 def build_sync_key(requestor_ids, start, end, leave_type):
     raw = f"{requestor_ids}|{start}|{end}|{leave_type}"
     return hashlib.sha256(raw.encode()).hexdigest()
+
+def people_ids(people):
+    """
+    Convert Notion People objects into write-safe payload.
+    """
+    return [{"id": p["id"]} for p in people if isinstance(p, dict) and p.get("id")]
 
 # ================= NOTION WRAPPERS =================
 @retry(wait=wait_exponential(1, 2, 30), stop=stop_after_attempt(5))
@@ -144,7 +150,6 @@ def main():
     for sp in source_pages:
         p = sp.get("properties", {})
 
-        # ---- Requestor ----
         req = p.get(PROP_REQUESTOR)
         if not req or req.get("type") != "people":
             continue
@@ -153,28 +158,22 @@ def main():
         if not people:
             continue
 
-        # ---- Leave start (date property) ----
         sd_prop = p.get(PROP_LEAVE_START, {}).get("date")
         if not sd_prop or not sd_prop.get("start"):
             continue
         start = date.fromisoformat(sd_prop["start"])
 
-        # ---- Leave end (FORMULA property) ----
         ed_formula = p.get(PROP_LEAVE_END, {}).get("formula", {})
         ed_date = ed_formula.get("date")
-
         if not ed_date or not ed_date.get("start"):
             continue
-
         end = date.fromisoformat(ed_date["start"])
 
-        # ---- Leave type ----
         lt = p.get(PROP_LEAVE_TYPE, {}).get("select")
         if not lt:
             continue
         leave_type = lt["name"]
 
-        # ---- Sync key ----
         requestor_ids = ",".join(u["id"] for u in people)
         sync_key = build_sync_key(requestor_ids, start, end, leave_type)
 
@@ -194,18 +193,17 @@ def main():
                 PROP_TITLE: {
                     "title": [{"text": {"content": title_text}}]
                 },
-                PROP_ASSIGNED_TO: {"people": people},
+                PROP_ASSIGNED_TO: {
+                    "people": people_ids(people)
+                },
                 PROP_LEAVE_START: {"date": {"start": start.isoformat()}},
                 PROP_LEAVE_END: {"date": {"start": end.isoformat()}},
                 PROP_LEAVE_TYPE: {"select": {"name": leave_type}},
-
-                # Client unavailability
                 PROP_CLIENT_UNAVAIL: {
                     "checkbox": bool(
                         p.get(PROP_CLIENT_UNAVAIL, {}).get("checkbox", False)
                     )
                 },
-
                 PROP_SYNC_KEY: {
                     "rich_text": [{"text": {"content": f"{sync_key}|{wk}"}}]
                 },
