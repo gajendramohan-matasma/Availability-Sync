@@ -1,0 +1,49 @@
+name: Notion Weekly Aggregation
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 1 * * *"  # daily 1am UTC
+
+concurrency:
+  group: notion-weekly-aggregation
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install --no-cache-dir -r requirements.txt
+
+      - name: Validate entrypoint
+        run: |
+          set -euo pipefail
+          test -f src/main.py
+          python --version
+
+      - name: Run Notion sync
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          SOURCE_TASK_DB_ID: ${{ secrets.SOURCE_TASK_DB_ID }}
+          TARGET_WEEKLY_DB_ID: ${{ secrets.TARGET_WEEKLY_DB_ID }}
+          SYNC_LOOKBACK_DAYS: 45
+        run: |
+          set -euo pipefail
+          echo "Sync started at $(date -u)"
+          python src/main.py
+          echo "Sync completed at $(date -u)"
+                               
