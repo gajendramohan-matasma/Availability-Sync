@@ -15,7 +15,7 @@ PROP_ASSIGNED_TO = "Assigned To"             # Target DB (People)
 PROP_LEAVE_START = "Leave Start Date"        # Date
 PROP_LEAVE_END = "Leave End Date"            # Formula (Date)
 PROP_LEAVE_TYPE = "Leave Type"               # Select
-PROP_CLIENT_UNAVAIL = "Client Unavailability"  # Checkbox
+PROP_CLIENT_UNAVAIL = "Client Unavailability"  # Checkbox / Formula / Rollup
 
 # ---- Target-only system properties ----
 PROP_TITLE = "Name"                          # Title
@@ -63,6 +63,29 @@ def people_ids(people):
     Convert Notion People objects into write-safe payload.
     """
     return [{"id": p["id"]} for p in people if isinstance(p, dict) and p.get("id")]
+
+def read_boolean(props, name):
+    """
+    Read boolean safely from Checkbox / Formula / Rollup.
+    """
+    p = props.get(name)
+    if not p:
+        return False
+
+    t = p.get("type")
+
+    if t == "checkbox":
+        return bool(p.get("checkbox"))
+
+    if t == "formula":
+        f = p.get("formula", {})
+        return f.get("type") == "boolean" and bool(f.get("boolean"))
+
+    if t == "rollup":
+        r = p.get("rollup", {})
+        return r.get("type") == "boolean" and bool(r.get("boolean"))
+
+    return False
 
 # ================= NOTION WRAPPERS =================
 @retry(wait=wait_exponential(1, 2, 30), stop=stop_after_attempt(5))
@@ -199,11 +222,12 @@ def main():
                 PROP_LEAVE_START: {"date": {"start": start.isoformat()}},
                 PROP_LEAVE_END: {"date": {"start": end.isoformat()}},
                 PROP_LEAVE_TYPE: {"select": {"name": leave_type}},
+
+                # ✅ FIXED BOOLEAN PASSING
                 PROP_CLIENT_UNAVAIL: {
-                    "checkbox": bool(
-                        p.get(PROP_CLIENT_UNAVAIL, {}).get("checkbox", False)
-                    )
+                    "checkbox": read_boolean(p, PROP_CLIENT_UNAVAIL)
                 },
+
                 PROP_SYNC_KEY: {
                     "rich_text": [{"text": {"content": f"{sync_key}|{wk}"}}]
                 },
