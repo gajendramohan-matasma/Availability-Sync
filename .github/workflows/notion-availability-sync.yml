@@ -41,9 +41,5 @@ jobs:
           SOURCE_TASK_DB_ID: ${{ secrets.SOURCE_TASK_DB_ID }}
           TARGET_WEEKLY_DB_ID: ${{ secrets.TARGET_WEEKLY_DB_ID }}
           SYNC_LOOKBACK_DAYS: 45
-        run: |
-          set -euo pipefail
-          echo "Sync started at $(date -u)"
-          python src/main.py
-          echo "Sync completed at $(date -u)"
+      
                                
