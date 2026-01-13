@@ -9,19 +9,16 @@ from tenacity import retry, wait_exponential, stop_after_attempt
 HOURS_PER_DAY = 9
 
 # ---- Source / Target properties ----
-PROP_REQUESTOR = "Requestor"          # Source DB (People)
-PROP_ASSIGNED_TO = "Assigned To"      # Target DB (People)
+PROP_REQUESTOR = "Requestor"                 # Source DB (People)
+PROP_ASSIGNED_TO = "Assigned To"             # Target DB (People)
 
-PROP_LEAVE_START = "Leave Start Date"
-PROP_LEAVE_END = "Leave End Date"
-PROP_LEAVE_TYPE = "Leave Type"
-PROP_CLIENT_UNAVAIL = "Client Unavailability"  # ✅ Checkbox
-
-# PROP_PROJECTS = "Projects"
-# PROP_WORKSTREAMS = "Impacted Workstreams"
+PROP_LEAVE_START = "Leave Start Date"        # Date
+PROP_LEAVE_END = "Leave End Date"            # ⚠️ Formula
+PROP_LEAVE_TYPE = "Leave Type"               # Select
+PROP_CLIENT_UNAVAIL = "Client Unavailability"  # Checkbox
 
 # ---- Target-only system properties ----
-PROP_TITLE = "Name"                   # REQUIRED (Title)
+PROP_TITLE = "Name"                          # Title
 PROP_SYNC_KEY = "Sync Key"
 PROP_ISO_WEEK = "ISO Week"
 PROP_LEAVE_DAYS = "Leave Days"
@@ -156,18 +153,28 @@ def main():
         if not people:
             continue
 
-        # ---- Mandatory fields ----
-        sd = p.get(PROP_LEAVE_START, {}).get("date")
-        ed = p.get(PROP_LEAVE_END, {}).get("date")
-        lt = p.get(PROP_LEAVE_TYPE, {}).get("select")
+        # ---- Leave start (date property) ----
+        sd_prop = p.get(PROP_LEAVE_START, {}).get("date")
+        if not sd_prop or not sd_prop.get("start"):
+            continue
+        start = date.fromisoformat(sd_prop["start"])
 
-        if not sd or not ed or not lt:
+        # ---- Leave end (FORMULA property) ----
+        ed_formula = p.get(PROP_LEAVE_END, {}).get("formula", {})
+        ed_date = ed_formula.get("date")
+
+        if not ed_date or not ed_date.get("start"):
             continue
 
-        start = date.fromisoformat(sd["start"])
-        end = date.fromisoformat(ed["start"])
+        end = date.fromisoformat(ed_date["start"])
+
+        # ---- Leave type ----
+        lt = p.get(PROP_LEAVE_TYPE, {}).get("select")
+        if not lt:
+            continue
         leave_type = lt["name"]
 
+        # ---- Sync key ----
         requestor_ids = ",".join(u["id"] for u in people)
         sync_key = build_sync_key(requestor_ids, start, end, leave_type)
 
@@ -192,7 +199,7 @@ def main():
                 PROP_LEAVE_END: {"date": {"start": end.isoformat()}},
                 PROP_LEAVE_TYPE: {"select": {"name": leave_type}},
 
-                # ✅ FIXED: Checkbox handling
+                # Client unavailability
                 PROP_CLIENT_UNAVAIL: {
                     "checkbox": bool(
                         p.get(PROP_CLIENT_UNAVAIL, {}).get("checkbox", False)
