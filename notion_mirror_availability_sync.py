@@ -17,8 +17,8 @@ PROP_LEAVE_END = "Leave End Date"
 PROP_LEAVE_TYPE = "Leave Type"
 PROP_CLIENT_UNAVAIL = "Client Unavailability"  # ✅ Checkbox
 
-PROP_PROJECTS = "Projects"
-PROP_WORKSTREAMS = "Impacted Workstreams"
+# PROP_PROJECTS = "Projects"
+# PROP_WORKSTREAMS = "Impacted Workstreams"
 
 # ---- Target-only system properties ----
 PROP_TITLE = "Name"                   # REQUIRED (Title)
@@ -199,9 +199,6 @@ def main():
                     )
                 },
 
-                PROP_WORKSTREAMS: {
-                    "multi_select": p.get(PROP_PROJECTS, {}).get("multi_select", [])
-                },
                 PROP_SYNC_KEY: {
                     "rich_text": [{"text": {"content": f"{sync_key}|{wk}"}}]
                 },
