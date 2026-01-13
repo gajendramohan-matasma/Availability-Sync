@@ -26,8 +26,8 @@ PROP_LEAVE_HOURS = "Leave Hours"
 PROP_LAST_SYNCED = "Last Synced At"
 
 NOTION_TOKEN = os.environ["NOTION_TOKEN"]
-SOURCE_DB_ID = os.environ["MASTER_DB_ID"]
-TARGET_DB_ID = os.environ["MIRROR_DB_ID"]
+SOURCE_DB_ID = os.environ["SOURCE_DB_ID"]
+TARGET_DB_ID = os.environ["TARGET_DB_ID"]
 
 notion = Client(auth=NOTION_TOKEN)
 
