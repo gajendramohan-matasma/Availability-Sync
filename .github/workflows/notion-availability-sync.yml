@@ -3,7 +3,7 @@ name: Notion Weekly Aggregation
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 1 * * *"  # daily 1am UTC
+    - cron: "30 0 * * *"  # daily 12:30 AM UTC
 
 concurrency:
   group: notion-weekly-aggregation
