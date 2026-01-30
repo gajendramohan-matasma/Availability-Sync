@@ -1,253 +1,193 @@
+from datetime import datetime
+from typing import Dict, Any, List
 import os
-import re
-import hashlib
-from datetime import date, datetime, timedelta
+
 from notion_client import Client
-from tenacity import retry, wait_exponential, stop_after_attempt
 
-# ================= CONFIG =================
-HOURS_PER_DAY = 9
+from src.logger import logger
+from src.load import upsert, build_master_uid_index
+from src.calendar_utils import iso_week_from_date_str
+from src.config import HOURS_PER_DAY, UNASSIGNED
 
-# ---- Source / Target properties ----
-PROP_REQUESTOR = "Requestor"                 # Source DB (People)
-PROP_ASSIGNED_TO = "Assigned To"             # Target DB (People)
 
-PROP_LEAVE_START = "Leave Start Date"        # Date
-PROP_LEAVE_END = "Leave End Date"            # Formula (Date)
-PROP_LEAVE_TYPE = "Leave Type"               # Select
-PROP_CLIENT_UNAVAIL = "Client Unavailability"  # Checkbox / Formula / Rollup
+# ================================================================
+# NOTION CLIENT
+# ================================================================
+def get_client() -> Client:
+    token = os.getenv("NOTION_TOKEN")
+    if not token:
+        raise RuntimeError("NOTION_TOKEN is required")
+    return Client(auth=token)
 
-# ---- Target-only system properties ----
-PROP_TITLE = "Name"                          # Title
-PROP_SYNC_KEY = "Sync Key"
-PROP_ISO_WEEK = "ISO Week"
-PROP_LEAVE_DAYS = "Leave Days"
-PROP_LEAVE_HOURS = "Leave Hours"
-PROP_LAST_SYNCED = "Last Synced At"
 
-# ---- Environment ----
-NOTION_TOKEN = os.environ["NOTION_TOKEN"]
-SOURCE_DB_ID = os.environ["SOURCE_DB_ID"]
-TARGET_DB_ID = os.environ["TARGET_DB_ID"]
+# ================================================================
+# SAFE PROPERTY EXTRACTORS
+# ================================================================
+def get_date(prop) -> str | None:
+    if not prop or prop.get("type") != "date":
+        return None
+    return prop.get("date", {}).get("start")
 
-notion = Client(auth=NOTION_TOKEN)
 
-# ================= UTILITIES =================
-def parse_db_id(val):
-    m = re.search(r'([0-9a-f]{32})', val.replace("-", ""), re.I)
-    raw = m.group(1)
-    return f"{raw[:8]}-{raw[8:12]}-{raw[12:16]}-{raw[16:20]}-{raw[20:]}"
+def get_people_ids(prop) -> List[str]:
+    if not prop or prop.get("type") != "people":
+        return []
+    return [p["id"] for p in prop.get("people", [])]
 
-def iso_week(d: date):
-    y, w, _ = d.isocalendar()
-    return f"{y}-W{w:02d}"
 
-def is_working_day(d: date):
-    return d.weekday() < 5
-
-def expand_date_range(start, end):
-    d = start
-    while d <= end:
-        yield d
-        d += timedelta(days=1)
-
-def leave_fraction(leave_type: str):
-    return 0.5 if leave_type and "half" in leave_type.lower() else 1.0
-
-def build_sync_key(requestor_ids, start, end, leave_type):
-    raw = f"{requestor_ids}|{start}|{end}|{leave_type}"
-    return hashlib.sha256(raw.encode()).hexdigest()
-
-def people_ids(people):
+def is_formula_approved(prop) -> bool:
     """
-    Convert Notion People objects into write-safe payload.
-    """
-    return [{"id": p["id"]} for p in people if isinstance(p, dict) and p.get("id")]
+    Authoritative approval gate.
 
-def read_boolean(props, name):
+    Only returns True if:
+    - Property is a formula
+    - Formula evaluates to 'Approved'
     """
-    Read boolean safely from Checkbox / Formula / Rollup.
-    """
-    p = props.get(name)
-    if not p:
+    if not prop or prop.get("type") != "formula":
         return False
 
-    t = p.get("type")
+    formula = prop.get("formula", {})
+    ftype = formula.get("type")
 
-    if t == "checkbox":
-        return bool(p.get("checkbox"))
+    if ftype == "string":
+        return formula.get("string") == "Approved"
 
-    if t == "formula":
-        f = p.get("formula", {})
-        return f.get("type") == "boolean" and bool(f.get("boolean"))
-
-    if t == "rollup":
-        r = p.get("rollup", {})
-        return r.get("type") == "boolean" and bool(r.get("boolean"))
+    if ftype == "select":
+        sel = formula.get("select")
+        return sel and sel.get("name") == "Approved"
 
     return False
 
-# ================= NOTION WRAPPERS =================
-@retry(wait=wait_exponential(1, 2, 30), stop=stop_after_attempt(5))
-def query_db(db_id, **kwargs):
-    return notion.databases.query(database_id=db_id, **kwargs)
 
-@retry(wait=wait_exponential(1, 2, 30), stop=stop_after_attempt(5))
-def create_page(db_id, props):
-    return notion.pages.create(
-        parent={"database_id": db_id},
-        properties=props
-    )
+# ================================================================
+# NORMALIZE LEAVE PAGE
+# ================================================================
+def normalize_leave(page: Dict[str, Any]) -> List[Dict[str, Any]]:
+    props = page.get("properties", {})
 
-@retry(wait=wait_exponential(1, 2, 30), stop=stop_after_attempt(5))
-def update_page(page_id, props):
-    return notion.pages.update(page_id=page_id, properties=props)
+    # ------------------------------------------------------------
+    # DATE (MANDATORY)
+    # ------------------------------------------------------------
+    start_date = get_date(props.get("Leave Start Date"))
+    end_date = get_date(props.get("Leave End Date")) or start_date
 
-def get_all_pages(db_id, filter=None):
-    pages, cursor = [], None
+    if not start_date:
+        logger.error(
+            "LEAVE_DROPPED_NO_START_DATE: page=%s",
+            page.get("id"),
+        )
+        return []
+
+    # ------------------------------------------------------------
+    # ASSIGNEES
+    # ------------------------------------------------------------
+    assignees = get_people_ids(props.get("Requestor"))
+    if not assignees:
+        assignees = [UNASSIGNED]
+
+    # ------------------------------------------------------------
+    # EXPAND DAYS → WEEKS
+    # ------------------------------------------------------------
+    from datetime import date, timedelta
+
+    start = date.fromisoformat(start_date[:10])
+    end = date.fromisoformat(end_date[:10])
+
+    rows = []
+
+    curr = start
+    while curr <= end:
+        week, week_start = iso_week_from_date_str(curr.isoformat())
+
+        for assignee in assignees:
+            rows.append({
+                "assignee": assignee,
+                "week": week,
+                "week_start": week_start,
+                "customer": "ALL",
+                "project": "ALL",
+                "workstream": "ALL",
+                "metric": "Availability",
+                "value": -HOURS_PER_DAY,
+                "source_page_id": page["id"],
+            })
+
+        curr += timedelta(days=1)
+
+    return rows
+
+
+# ================================================================
+# MAIN SYNC
+# ================================================================
+def run():
+    db_id = os.getenv("AVAILABILITY_DB_ID")
+    if not db_id:
+        raise RuntimeError("AVAILABILITY_DB_ID must be set")
+
+    notion = get_client()
+    uid_index = build_master_uid_index()
+
+    logger.info("Starting availability sync")
+
+    pages = []
+    cursor = None
+
     while True:
-        resp = query_db(
-            db_id,
+        resp = notion.databases.query(
+            database_id=db_id,
             start_cursor=cursor,
-            page_size=100,
-            **({"filter": filter} if filter else {})
         )
-        pages.extend(resp["results"])
-        if not resp["has_more"]:
+        pages.extend(resp.get("results", []))
+        cursor = resp.get("next_cursor")
+        if not cursor:
             break
-        cursor = resp["next_cursor"]
-    return pages
 
-# ================= INDEX TARGET =================
-def build_target_index():
-    pages = get_all_pages(TARGET_DB_ID)
-    idx = {}
-    for p in pages:
-        rt = p["properties"].get(PROP_SYNC_KEY, {}).get("rich_text", [])
-        if rt:
-            idx[rt[0]["plain_text"]] = p["id"]
-    return idx
+    logger.info("Fetched %d availability requests", len(pages))
 
-def last_sync_time():
-    try:
-        pages = get_all_pages(
-            TARGET_DB_ID,
-            filter={
-                "property": PROP_LAST_SYNCED,
-                "date": {"is_not_empty": True}
-            }
-        )
-    except Exception:
-        return None
+    approved = 0
+    skipped = 0
 
-    if not pages:
-        return None
+    for page in pages:
+        props = page.get("properties", {})
 
-    return max(
-        datetime.fromisoformat(
-            p["properties"][PROP_LAST_SYNCED]["date"]["start"]
-        )
-        for p in pages
-        if p["properties"].get(PROP_LAST_SYNCED, {}).get("date")
+        # --------------------------------------------------------
+        # 🔒 APPROVAL GATE (FORMULA-AWARE, AUTHORITATIVE)
+        # --------------------------------------------------------
+        if not is_formula_approved(props.get("Status")):
+            skipped += 1
+            logger.debug(
+                "LEAVE_SKIPPED_NOT_APPROVED: page=%s",
+                page.get("id"),
+            )
+            continue
+
+        approved += 1
+
+        rows = normalize_leave(page)
+        for r in rows:
+            upsert(
+                assignee=r["assignee"],
+                week=r["week"],
+                week_start=r["week_start"],
+                customer=r["customer"],
+                project=r["project"],
+                workstream=r["workstream"],
+                metric=r["metric"],
+                value=r["value"],
+                pages=[r["source_page_id"]],
+                uid_index=uid_index,
+            )
+
+    logger.info(
+        "Availability sync complete | approved=%d skipped=%d",
+        approved,
+        skipped,
     )
 
-# ================= MAIN LOGIC =================
-def main():
-    source_db = parse_db_id(SOURCE_DB_ID)
-    target_db = parse_db_id(TARGET_DB_ID)
 
-    since = last_sync_time()
-    source_filter = None
-    if since:
-        source_filter = {
-            "timestamp": "last_edited_time",
-            "last_edited_time": {"after": since.isoformat()}
-        }
-
-    source_pages = get_all_pages(source_db, filter=source_filter)
-    target_index = build_target_index()
-
-    created = updated = 0
-    now_iso = datetime.utcnow().isoformat()
-
-    for sp in source_pages:
-        p = sp.get("properties", {})
-
-        req = p.get(PROP_REQUESTOR)
-        if not req or req.get("type") != "people":
-            continue
-
-        people = req.get("people", [])
-        if not people:
-            continue
-
-        sd_prop = p.get(PROP_LEAVE_START, {}).get("date")
-        if not sd_prop or not sd_prop.get("start"):
-            continue
-        start = date.fromisoformat(sd_prop["start"])
-
-        ed_formula = p.get(PROP_LEAVE_END, {}).get("formula", {})
-        ed_date = ed_formula.get("date")
-        if not ed_date or not ed_date.get("start"):
-            continue
-        end = date.fromisoformat(ed_date["start"])
-
-        lt = p.get(PROP_LEAVE_TYPE, {}).get("select")
-        if not lt:
-            continue
-        leave_type = lt["name"]
-
-        requestor_ids = ",".join(u["id"] for u in people)
-        sync_key = build_sync_key(requestor_ids, start, end, leave_type)
-
-        weekly = {}
-        frac = leave_fraction(leave_type)
-
-        for d in expand_date_range(start, end):
-            if not is_working_day(d):
-                continue
-            wk = iso_week(d)
-            weekly[wk] = weekly.get(wk, 0) + frac
-
-        for wk, days in weekly.items():
-            title_text = f"{leave_type} | {wk}"
-
-            props = {
-                PROP_TITLE: {
-                    "title": [{"text": {"content": title_text}}]
-                },
-                PROP_ASSIGNED_TO: {
-                    "people": people_ids(people)
-                },
-                PROP_LEAVE_START: {"date": {"start": start.isoformat()}},
-                PROP_LEAVE_END: {"date": {"start": end.isoformat()}},
-                PROP_LEAVE_TYPE: {"select": {"name": leave_type}},
-
-                # ✅ FIXED BOOLEAN PASSING
-                PROP_CLIENT_UNAVAIL: {
-                    "checkbox": read_boolean(p, PROP_CLIENT_UNAVAIL)
-                },
-
-                PROP_SYNC_KEY: {
-                    "rich_text": [{"text": {"content": f"{sync_key}|{wk}"}}]
-                },
-                PROP_ISO_WEEK: {
-                    "rich_text": [{"text": {"content": wk}}]
-                },
-                PROP_LEAVE_DAYS: {"number": days},
-                PROP_LEAVE_HOURS: {"number": days * HOURS_PER_DAY},
-                PROP_LAST_SYNCED: {"date": {"start": now_iso}},
-            }
-
-            key = f"{sync_key}|{wk}"
-            if key in target_index:
-                update_page(target_index[key], props)
-                updated += 1
-            else:
-                create_page(target_db, props)
-                created += 1
-
-    print(f"Done. Created={created}, Updated={updated}")
-
+# ================================================================
+# ENTRYPOINT
+# ================================================================
 if __name__ == "__main__":
-    main()
+    run()
