@@ -3,7 +3,8 @@ name: Notion Weekly Aggregation
 on:
   workflow_dispatch:
   schedule:
-    - cron: "30 0 * * *"  # daily 12:30 AM UTC
+    # Daily at 12:30 AM UTC
+    - cron: "30 0 * * *"
 
 concurrency:
   group: notion-weekly-aggregation
@@ -35,5 +36,12 @@ jobs:
           TARGET_DB_ID: ${{ secrets.TARGET_DB_ID }}
           SYNC_LOOKBACK_DAYS: 45
         run: |
-          export PYTHONPATH="$GITHUB_WORKSPACE"
+          # IMPORTANT:
+          # Repo structure is:
+          # $GITHUB_WORKSPACE/Availability-Sync/
+          #   ├── src/
+          #   └── notion_mirror_availability_sync.py
+          #
+          # PYTHONPATH must point to the directory *containing* src/
+          export PYTHONPATH="$GITHUB_WORKSPACE/Availability-Sync"
           python notion_mirror_availability_sync.py
