@@ -34,6 +34,6 @@ jobs:
           SOURCE_DB_ID: ${{ secrets.SOURCE_DB_ID }}
           TARGET_DB_ID: ${{ secrets.TARGET_DB_ID }}
           SYNC_LOOKBACK_DAYS: 45
-          PYTHONPATH: ${{ github.workspace }}
         run: |
+          export PYTHONPATH="$GITHUB_WORKSPACE"
           python notion_mirror_availability_sync.py
