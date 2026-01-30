@@ -1,6 +1,6 @@
 import os
 import logging
-from datetime import datetime, timedelta, date
+from datetime import datetime, date
 from typing import Dict, List
 
 from notion_client import Client
@@ -20,7 +20,6 @@ logger = logging.getLogger(__name__)
 NOTION_TOKEN = os.getenv("NOTION_TOKEN")
 SOURCE_DB_ID = os.getenv("SOURCE_DB_ID")
 TARGET_DB_ID = os.getenv("TARGET_DB_ID")
-LOOKBACK_DAYS = int(os.getenv("SYNC_LOOKBACK_DAYS", "45"))
 
 if not all([NOTION_TOKEN, SOURCE_DB_ID, TARGET_DB_ID]):
     raise RuntimeError("Missing required environment variables")
@@ -30,11 +29,6 @@ notion = Client(auth=NOTION_TOKEN)
 # ------------------------------------------------------------------
 # HELPERS
 # ------------------------------------------------------------------
-def iso_week(d: date) -> str:
-    y, w, _ = d.isocalendar()
-    return f"{y}-W{w:02d}"
-
-
 def get_formula_string(prop) -> str | None:
     if not prop or prop.get("type") != "formula":
         return None
@@ -70,60 +64,66 @@ def query_all(db_id: str, filter_payload=None) -> List[Dict]:
 
     return results
 
+
 # ------------------------------------------------------------------
 # MAIN
 # ------------------------------------------------------------------
 def run():
-    cutoff = date.today() - timedelta(days=LOOKBACK_DAYS)
-    logger.info("Syncing approved availability from %s onward", cutoff)
+    logger.info("Syncing approved leave metadata (Option C)")
 
+    # --------------------------------------------------------------
+    # Fetch source rows
+    # --------------------------------------------------------------
     source_rows = query_all(SOURCE_DB_ID)
     logger.info("Fetched %d source rows", len(source_rows))
 
-    # Build target index
+    # --------------------------------------------------------------
+    # Build target index (Sync Key → Page ID)
+    # --------------------------------------------------------------
     target_index: Dict[str, str] = {}
     for row in query_all(TARGET_DB_ID):
-        key = row.get("properties", {}).get("Sync Key", {}).get("rich_text", [])
-        if key:
-            target_index[key[0]["plain_text"]] = row["id"]
+        key_prop = row.get("properties", {}).get("Sync Key", {}).get("rich_text", [])
+        if key_prop:
+            target_index[key_prop[0]["plain_text"]] = row["id"]
 
     created = updated = skipped = 0
 
+    # --------------------------------------------------------------
+    # Process source rows
+    # --------------------------------------------------------------
     for page in source_rows:
         props = page.get("properties", {})
 
-        # ------------------ APPROVED ONLY ------------------
+        # Approved only
         status = get_formula_string(props.get("Status"))
         if status != "Approved":
             skipped += 1
             continue
 
-        start = get_date(props.get("Leave Start Date"))
-        end = get_date(props.get("Leave End Date"))
-        if not start or not end or end < cutoff:
+        start_date = get_date(props.get("Leave Start Date"))
+        end_date = get_date(props.get("Leave End Date"))
+
+        # Must have valid dates
+        if not start_date or not end_date:
             skipped += 1
             continue
-
-        leave_type = (
-            props.get("Leave Type", {})
-            .get("select", {})
-            .get("name", "Unknown")
-        )
 
         assignees = props.get("Requestor", {}).get("people", [])
         if not assignees:
             skipped += 1
             continue
 
+        leave_type = props.get("Leave Type", {}).get("select", {})
+        leave_type_name = leave_type.get("name") if leave_type else None
+
         for person in assignees:
-            week = iso_week(start)
-            sync_key = f"{page['id']}|{person['id']}|{week}"
+            sync_key = f"{page['id']}|{person['id']}|LEAVE"
 
             payload = {
                 "Name": {
                     "title": [{
                         "text": {
-                            "content": f"Leave | {person['id']} | {week}"
+                            "content": f"Leave | {person['id']} | {start_date} → {end_date}"
                         }
                     }]
                 },
@@ -133,18 +133,17 @@ def run():
                 "Assigned To": {
                     "people": [{"id": person["id"]}]
                 },
-                "ISO Week": {
-                    "rich_text": [{"text": {"content": week}}]
-                },
                 "Leave Start Date": {
-                    "date": {"start": start.isoformat()}
+                    "date": {"start": start_date.isoformat()}
                 },
                 "Leave End Date": {
-                    "date": {"start": end.isoformat()}
+                    "date": {"start": end_date.isoformat()}
                 },
-                "Leave Type": {
-                    "select": {"name": leave_type}
-                },
+                "Leave Type": (
+                    {"select": {"name": leave_type_name}}
+                    if leave_type_name
+                    else None
+                ),
                 "Client Unavailability": {
                     "checkbox": True
                 },
@@ -152,6 +151,9 @@ def run():
                     "date": {"start": datetime.utcnow().isoformat()}
                 },
             }
+
+            # Remove None values (Notion rejects them)
+            payload = {k: v for k, v in payload.items() if v is not None}
 
             existing_id = target_index.get(sync_key)
 
@@ -167,8 +169,10 @@ def run():
                 created += 1
 
     logger.info(
-        "Availability sync completed | created=%d updated=%d skipped=%d",
-        created, updated, skipped
+        "Leave metadata sync completed | created=%d updated=%d skipped=%d",
+        created,
+        updated,
+        skipped,
     )
 
 
