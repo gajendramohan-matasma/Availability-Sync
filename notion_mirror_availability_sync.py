@@ -6,7 +6,7 @@ from typing import Dict, List
 from notion_client import Client
 
 # ------------------------------------------------------------------
-# LOGGING (STANDALONE)
+# LOGGING
 # ------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
@@ -28,6 +28,19 @@ if not all([NOTION_TOKEN, SOURCE_DB_ID, TARGET_DB_ID]):
 notion = Client(auth=NOTION_TOKEN)
 
 # ------------------------------------------------------------------
+# DESTINATION DB PROPERTY NAMES (AUTHORITATIVE)
+# ------------------------------------------------------------------
+P_NAME = "Name"
+P_ASSIGNEE = "Assigned To"
+P_ISO_WEEK = "ISO Week"
+P_START = "Leave Start Date"
+P_END = "Leave End Date"
+P_TYPE = "Leave Type"
+P_FLAG = "Client Unavailability"
+P_SYNC_KEY = "Sync Key"
+P_LAST_SYNC = "Last Synced At"
+
+# ------------------------------------------------------------------
 # HELPERS
 # ------------------------------------------------------------------
 def iso_week(d: date) -> str:
@@ -44,30 +57,10 @@ def get_date(prop) -> date | None:
     return date.fromisoformat(d["start"][:10])
 
 
-def is_approved(props: dict) -> bool:
-    """
-    Code-only approval gate.
-    Works for Formula / Status / Select.
-    """
-    status = props.get("Status")
-    if not status:
-        return False
-
-    ptype = status.get("type")
-
-    if ptype == "formula":
-        value = status.get("formula", {}).get("string")
-    elif ptype == "status":
-        value = status.get("status", {}).get("name")
-    elif ptype == "select":
-        value = status.get("select", {}).get("name")
-    else:
-        return False
-
-    if not value:
-        return False
-
-    return value.strip().lower() == "approved"
+def get_formula_string(prop) -> str | None:
+    if not prop or prop.get("type") != "formula":
+        return None
+    return prop.get("formula", {}).get("string")
 
 
 def query_all(db_id: str, filter_payload=None) -> List[Dict]:
@@ -96,37 +89,41 @@ def query_all(db_id: str, filter_payload=None) -> List[Dict]:
 # ------------------------------------------------------------------
 def run():
     cutoff = date.today() - timedelta(days=LOOKBACK_DAYS)
-    logger.info("Syncing availability from %s onward", cutoff)
+    logger.info("Syncing approved availability from %s onward", cutoff)
 
     source_rows = query_all(SOURCE_DB_ID)
     logger.info("Fetched %d source rows", len(source_rows))
 
+    # --------------------------------------------------------------
+    # Build target index (Sync Key → Page ID)
+    # --------------------------------------------------------------
     target_index: Dict[str, str] = {}
     for row in query_all(TARGET_DB_ID):
-        uid = (
+        key = (
             row.get("properties", {})
-            .get("Source UID", {})
+            .get(P_SYNC_KEY, {})
             .get("rich_text", [])
         )
-        if uid:
-            target_index[uid[0]["plain_text"]] = row["id"]
+        if key:
+            target_index[key[0]["plain_text"]] = row["id"]
 
-    created = updated = skipped = rejected = 0
+    created = updated = skipped = 0
 
     for page in source_rows:
         props = page.get("properties", {})
 
         # ----------------------------------------------------------
-        # APPROVAL GATE (AUTHORITATIVE, CODE-ONLY)
+        # APPROVED ONLY (FORMULA FIELD)
         # ----------------------------------------------------------
-        if not is_approved(props):
-            rejected += 1
+        status = get_formula_string(props.get("Status"))
+        if status != "Approved":
+            skipped += 1
             continue
 
-        start_date = get_date(props.get("Leave Start Date"))
-        end_date = get_date(props.get("Leave End Date")) or start_date
+        start = get_date(props.get("Leave Start Date"))
+        end = get_date(props.get("Leave End Date"))
 
-        if not start_date or not end_date or end_date < cutoff:
+        if not start or not end or end < cutoff:
             skipped += 1
             continue
 
@@ -135,57 +132,69 @@ def run():
             skipped += 1
             continue
 
+        leave_type = (
+            props.get("Leave Type", {})
+            .get("select", {})
+            .get("name")
+        )
+
         for person in assignees:
-            for offset in range((end_date - start_date).days + 1):
-                d = start_date + timedelta(days=offset)
+            for i in range((end - start).days + 1):
+                d = start + timedelta(days=i)
                 if d < cutoff:
                     continue
 
                 week = iso_week(d)
-                source_uid = f"{person['id']}|{week}|Availability"
+                sync_key = f"{person['id']}|{week}"
 
                 payload = {
-                    "Name": {
+                    P_NAME: {
                         "title": [{
                             "text": {
                                 "content": f"Availability | {person['id']} | {week}"
                             }
                         }]
                     },
-                    "Source UID": {
-                        "rich_text": [{"text": {"content": source_uid}}]
+                    P_SYNC_KEY: {
+                        "rich_text": [{"text": {"content": sync_key}}]
                     },
-                    "Assigned To": {"people": [{"id": person["id"]}]},
-                    "Calendar Week": {
+                    P_ASSIGNEE: {"people": [{"id": person["id"]}]},
+                    P_ISO_WEEK: {
                         "rich_text": [{"text": {"content": week}}]
                     },
-                    "Week Start": {"date": {"start": d.isoformat()}},
-                    "Metric Type": {"select": {"name": "Availability"}},
-                    "Value": {"number": 0},
-                    "Last Synced At": {
+                    P_START: {"date": {"start": start.isoformat()}},
+                    P_END: {"date": {"start": end.isoformat()}},
+                    P_TYPE: (
+                        {"select": {"name": leave_type}}
+                        if leave_type else None
+                    ),
+                    P_FLAG: {"checkbox": True},
+                    P_LAST_SYNC: {
                         "date": {"start": datetime.utcnow().isoformat()}
                     },
                 }
 
-                existing_id = target_index.get(source_uid)
+                # remove None properties (Notion rejects them)
+                payload = {k: v for k, v in payload.items() if v is not None}
 
-                if existing_id:
-                    notion.pages.update(page_id=existing_id, properties=payload)
+                existing = target_index.get(sync_key)
+
+                if existing:
+                    notion.pages.update(page_id=existing, properties=payload)
                     updated += 1
                 else:
                     resp = notion.pages.create(
                         parent={"database_id": TARGET_DB_ID},
                         properties=payload,
                     )
-                    target_index[source_uid] = resp["id"]
+                    target_index[sync_key] = resp["id"]
                     created += 1
 
     logger.info(
-        "Availability sync completed | created=%d updated=%d skipped=%d rejected=%d",
+        "Availability sync completed | created=%d updated=%d skipped=%d",
         created,
         updated,
         skipped,
-        rejected,
     )
 
 
