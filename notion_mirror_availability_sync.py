@@ -88,6 +88,15 @@ def run():
     source_rows = query_all(SOURCE_DB_ID, source_filter)
     logger.info("Fetched %d APPROVED source rows", len(source_rows))
 
+    # Debug: If no rows, try without filter to check connection
+    if len(source_rows) == 0:
+        all_rows = query_all(SOURCE_DB_ID)
+        logger.warning("DEBUG: No approved rows found. Total rows without filter: %d", len(all_rows))
+        if all_rows:
+            sample_props = all_rows[0].get("properties", {})
+            status_prop = sample_props.get("Status", {})
+            logger.warning("DEBUG: Sample Status property: %s", status_prop)
+
     # --------------------------------------------------------
     # TARGET INDEX (Sync Key → Page ID)
     # --------------------------------------------------------
@@ -110,10 +119,20 @@ def run():
     for page in source_rows:
         props = page.get("properties", {})
 
+        # Debug: Log available properties for first row
+        if source_rows.index(page) == 0:
+            logger.info("DEBUG: Available properties in source: %s", list(props.keys()))
+
         start_date = get_date(props.get("Leave Start Date"))
         end_date = get_date(props.get("Till Date"))  # Source uses "Till Date", not "Leave End Date"
 
+        # Debug: Log date extraction
+        logger.info("DEBUG: Page %s | start_date=%s | end_date=%s | cutoff=%s",
+                    page['id'][:8], start_date, end_date, cutoff)
+
         if not start_date or not end_date or end_date < cutoff:
+            logger.info("DEBUG: Skipping - start_date=%s, end_date=%s, cutoff=%s",
+                        start_date, end_date, cutoff)
             skipped += 1
             continue
 
