@@ -116,23 +116,26 @@ def run():
     # --------------------------------------------------------
     # PROCESS SOURCE ROWS
     # --------------------------------------------------------
+    # Debug: Log property names from first row
+    if source_rows:
+        first_props = source_rows[0].get("properties", {})
+        logger.info("DEBUG: All property names: %s", list(first_props.keys()))
+        # Log raw date properties to see their structure
+        for key in first_props:
+            if "date" in key.lower() or "till" in key.lower() or "start" in key.lower() or "end" in key.lower():
+                logger.info("DEBUG: Property '%s' = %s", key, first_props[key])
+
     for page in source_rows:
         props = page.get("properties", {})
-
-        # Debug: Log available properties for first row
-        if source_rows.index(page) == 0:
-            logger.info("DEBUG: Available properties in source: %s", list(props.keys()))
 
         start_date = get_date(props.get("Leave Start Date"))
         end_date = get_date(props.get("Till Date"))  # Source uses "Till Date", not "Leave End Date"
 
-        # Debug: Log date extraction
-        logger.info("DEBUG: Page %s | start_date=%s | end_date=%s | cutoff=%s",
-                    page['id'][:8], start_date, end_date, cutoff)
-
         if not start_date or not end_date or end_date < cutoff:
-            logger.info("DEBUG: Skipping - start_date=%s, end_date=%s, cutoff=%s",
-                        start_date, end_date, cutoff)
+            # Only log first few skips to avoid spam
+            if skipped < 3:
+                logger.info("DEBUG: Skipping page %s - start=%s, end=%s, cutoff=%s",
+                            page['id'][:8], start_date, end_date, cutoff)
             skipped += 1
             continue
 
