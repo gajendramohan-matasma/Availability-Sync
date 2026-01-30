@@ -111,7 +111,7 @@ def run():
         props = page.get("properties", {})
 
         start_date = get_date(props.get("Leave Start Date"))
-        end_date = get_date(props.get("Leave End Date"))
+        end_date = get_date(props.get("Till Date"))  # Source uses "Till Date", not "Leave End Date"
 
         if not start_date or not end_date or end_date < cutoff:
             skipped += 1
@@ -119,6 +119,21 @@ def run():
 
         leave_type = props.get("Leave Type", {}).get("select", {})
         leave_type_name = leave_type.get("name") if leave_type else None
+
+        # Extract Requestor (person) to map to Assigned To in target
+        requestor_prop = props.get("Requestor", {})
+        requestor_people = requestor_prop.get("people", []) if requestor_prop else []
+
+        # Extract Client Unavailability from source (it's a formula returning boolean)
+        client_unavail_prop = props.get("Client Unavailability", {})
+        if client_unavail_prop.get("type") == "formula":
+            client_unavailability = client_unavail_prop.get("formula", {}).get("boolean", False)
+        else:
+            client_unavailability = client_unavail_prop.get("checkbox", False)
+
+        # Calculate ISO Week from start date (format: "2026-W05")
+        iso_year, iso_week, _ = start_date.isocalendar()
+        iso_week_str = f"{iso_year}-W{iso_week:02d}"
 
         sync_key = f"{page['id']}|LEAVE"
 
@@ -144,7 +159,13 @@ def run():
                 if leave_type_name
                 else None
             ),
-            "Client Unavailability": {"checkbox": True},
+            "Client Unavailability": {"checkbox": client_unavailability},
+            "ISO Week": {"rich_text": [{"text": {"content": iso_week_str}}]},
+            "Assigned To": (
+                {"people": [{"id": p["id"]} for p in requestor_people]}
+                if requestor_people
+                else None
+            ),
             "Last Synced At": {
                 "date": {"start": datetime.utcnow().isoformat()}
             },
