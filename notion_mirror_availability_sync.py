@@ -6,7 +6,7 @@ from typing import Dict, List
 from notion_client import Client
 
 # ------------------------------------------------------------------
-# LOGGING (NO src DEPENDENCY)
+# LOGGING (STANDALONE)
 # ------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
@@ -35,12 +35,6 @@ def iso_week(d: date) -> str:
     return f"{year}-W{week:02d}"
 
 
-def get_formula_string(prop) -> str | None:
-    if not prop or prop.get("type") != "formula":
-        return None
-    return prop.get("formula", {}).get("string")
-
-
 def get_date(prop) -> date | None:
     if not prop:
         return None
@@ -48,6 +42,32 @@ def get_date(prop) -> date | None:
     if not d or not d.get("start"):
         return None
     return date.fromisoformat(d["start"][:10])
+
+
+def is_approved(props: dict) -> bool:
+    """
+    Code-only approval gate.
+    Works for Formula / Status / Select.
+    """
+    status = props.get("Status")
+    if not status:
+        return False
+
+    ptype = status.get("type")
+
+    if ptype == "formula":
+        value = status.get("formula", {}).get("string")
+    elif ptype == "status":
+        value = status.get("status", {}).get("name")
+    elif ptype == "select":
+        value = status.get("select", {}).get("name")
+    else:
+        return False
+
+    if not value:
+        return False
+
+    return value.strip().lower() == "approved"
 
 
 def query_all(db_id: str, filter_payload=None) -> List[Dict]:
@@ -91,21 +111,20 @@ def run():
         if uid:
             target_index[uid[0]["plain_text"]] = row["id"]
 
-    created = updated = skipped = 0
+    created = updated = skipped = rejected = 0
 
     for page in source_rows:
         props = page.get("properties", {})
 
         # ----------------------------------------------------------
-        # FILTER: ONLY APPROVED (FORMULA FIELD)
+        # APPROVAL GATE (AUTHORITATIVE, CODE-ONLY)
         # ----------------------------------------------------------
-        status = get_formula_string(props.get("Status"))
-        if status != "Approved":
-            skipped += 1
+        if not is_approved(props):
+            rejected += 1
             continue
 
         start_date = get_date(props.get("Leave Start Date"))
-        end_date = get_date(props.get("Leave End Date"))
+        end_date = get_date(props.get("Leave End Date")) or start_date
 
         if not start_date or not end_date or end_date < cutoff:
             skipped += 1
@@ -162,10 +181,11 @@ def run():
                     created += 1
 
     logger.info(
-        "Availability sync completed | created=%d updated=%d skipped=%d",
+        "Availability sync completed | created=%d updated=%d skipped=%d rejected=%d",
         created,
         updated,
         skipped,
+        rejected,
     )
 
 
