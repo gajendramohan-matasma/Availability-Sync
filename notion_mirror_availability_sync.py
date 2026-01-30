@@ -179,7 +179,7 @@ def run():
                 else None
             ),
             "Client Unavailability": {"checkbox": client_unavailability},
-            "ISO Week": {"select": {"name": iso_week_str}},
+            "ISO Week": {"rich_text": [{"text": {"content": iso_week_str}}]},
             "Assigned To": (
                 {"people": [{"id": p["id"]} for p in requestor_people]}
                 if requestor_people
