@@ -146,6 +146,10 @@ def run():
         requestor_prop = props.get("Requestor", {})
         requestor_people = requestor_prop.get("people", []) if requestor_prop else []
 
+        # Extract Client Unavailability checkbox from source
+        client_unavail_prop = props.get("Client Unavailability", {})
+        client_unavailability = client_unavail_prop.get("checkbox", False)
+
         # Calculate ISO Week from start date (format: "2026-W05")
         iso_year, iso_week, _ = start_date.isocalendar()
         iso_week_str = f"{iso_year}-W{iso_week:02d}"
@@ -174,7 +178,7 @@ def run():
                 if leave_type_name
                 else None
             ),
-            "Client Unavailability": {"checkbox": True},
+            "Client Unavailability": {"checkbox": client_unavailability},
             "ISO Week": {"select": {"name": iso_week_str}},
             "Assigned To": (
                 {"people": [{"id": p["id"]} for p in requestor_people]}
