@@ -88,15 +88,6 @@ def run():
     source_rows = query_all(SOURCE_DB_ID, source_filter)
     logger.info("Fetched %d APPROVED source rows", len(source_rows))
 
-    # Debug: If no rows, try without filter to check connection
-    if len(source_rows) == 0:
-        all_rows = query_all(SOURCE_DB_ID)
-        logger.warning("DEBUG: No approved rows found. Total rows without filter: %d", len(all_rows))
-        if all_rows:
-            sample_props = all_rows[0].get("properties", {})
-            status_prop = sample_props.get("Status", {})
-            logger.warning("DEBUG: Sample Status property: %s", status_prop)
-
     # --------------------------------------------------------
     # TARGET INDEX (Sync Key → Page ID)
     # --------------------------------------------------------
@@ -116,15 +107,6 @@ def run():
     # --------------------------------------------------------
     # PROCESS SOURCE ROWS
     # --------------------------------------------------------
-    # Debug: Log property names from first row
-    if source_rows:
-        first_props = source_rows[0].get("properties", {})
-        logger.info("DEBUG: All property names: %s", list(first_props.keys()))
-        # Log raw date and client unavailability properties to see their structure
-        for key in first_props:
-            if "date" in key.lower() or "till" in key.lower() or "start" in key.lower() or "end" in key.lower() or "client" in key.lower() or "unavail" in key.lower():
-                logger.info("DEBUG: Property '%s' = %s", key, first_props[key])
-
     for page in source_rows:
         props = page.get("properties", {})
 
@@ -132,10 +114,6 @@ def run():
         end_date = get_date(props.get("Till Date"))  # Source uses "Till Date", not "Leave End Date"
 
         if not start_date or not end_date or end_date < cutoff:
-            # Only log first few skips to avoid spam
-            if skipped < 3:
-                logger.info("DEBUG: Skipping page %s - start=%s, end=%s, cutoff=%s",
-                            page['id'][:8], start_date, end_date, cutoff)
             skipped += 1
             continue
 
