@@ -120,9 +120,9 @@ def run():
     if source_rows:
         first_props = source_rows[0].get("properties", {})
         logger.info("DEBUG: All property names: %s", list(first_props.keys()))
-        # Log raw date properties to see their structure
+        # Log raw date and client unavailability properties to see their structure
         for key in first_props:
-            if "date" in key.lower() or "till" in key.lower() or "start" in key.lower() or "end" in key.lower():
+            if "date" in key.lower() or "till" in key.lower() or "start" in key.lower() or "end" in key.lower() or "client" in key.lower() or "unavail" in key.lower():
                 logger.info("DEBUG: Property '%s' = %s", key, first_props[key])
 
     for page in source_rows:
