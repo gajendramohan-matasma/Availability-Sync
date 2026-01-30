@@ -6,7 +6,7 @@ from typing import Dict, List
 from notion_client import Client
 
 # ------------------------------------------------------------------
-# LOGGING
+# LOGGING (NO src DEPENDENCY)
 # ------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
@@ -44,23 +44,6 @@ def get_date(prop) -> date | None:
     return date.fromisoformat(d["start"][:10])
 
 
-def get_status_value(prop) -> str | None:
-    """
-    Read REAL Notion status/select field.
-    Never trust formula output for filtering.
-    """
-    if not prop:
-        return None
-
-    if prop.get("type") == "status":
-        return prop.get("status", {}).get("name")
-
-    if prop.get("type") == "select":
-        return prop.get("select", {}).get("name")
-
-    return None
-
-
 def query_all(db_id: str, filter_payload=None) -> List[Dict]:
     results = []
     cursor = None
@@ -89,54 +72,56 @@ def run():
     cutoff = date.today() - timedelta(days=LOOKBACK_DAYS)
     logger.info("Syncing approved availability from %s onward", cutoff)
 
-    # ---------------------------
-    # SOURCE FETCH (no formula filtering)
-    # ---------------------------
-    source_rows = query_all(SOURCE_DB_ID)
-    logger.info("Fetched %d source rows", len(source_rows))
+    # --------------------------------------------------------------
+    # 🔒 QUERY-LEVEL FILTER (FORMULA SAFE)
+    # --------------------------------------------------------------
+    approved_filter = {
+        "property": "Status",
+        "formula": {
+            "string": {
+                "equals": "Approved"
+            }
+        }
+    }
 
-    # ---------------------------
-    # TARGET INDEX
-    # ---------------------------
+    source_rows = query_all(SOURCE_DB_ID, approved_filter)
+    logger.info("Fetched %d APPROVED source rows", len(source_rows))
+
+    # --------------------------------------------------------------
+    # BUILD TARGET INDEX (Sync Key)
+    # --------------------------------------------------------------
     target_index: Dict[str, str] = {}
     for row in query_all(TARGET_DB_ID):
-        uid = (
+        key_prop = (
             row.get("properties", {})
             .get("Sync Key", {})
             .get("rich_text", [])
         )
-        if uid:
-            target_index[uid[0]["plain_text"]] = row["id"]
+        if key_prop:
+            target_index[key_prop[0]["plain_text"]] = row["id"]
 
-    created = updated = skipped = 0
+    created = updated = 0
 
+    # --------------------------------------------------------------
+    # PROCESS SOURCE ROWS
+    # --------------------------------------------------------------
     for page in source_rows:
         props = page.get("properties", {})
-
-        # ----------------------------------------------------------
-        # FILTER: ONLY APPROVED (REAL STATUS FIELD)
-        # ----------------------------------------------------------
-        status_value = get_status_value(props.get("Status"))
-        if status_value != "Approved":
-            skipped += 1
-            continue
 
         start_date = get_date(props.get("Leave Start Date"))
         end_date = get_date(props.get("Leave End Date"))
 
         if not start_date or not end_date or end_date < cutoff:
-            skipped += 1
             continue
 
         assignees = props.get("Requestor", {}).get("people", [])
         if not assignees:
-            skipped += 1
             continue
 
         leave_type = (
             props.get("Leave Type", {})
             .get("select", {})
-            .get("name")
+            .get("name", "Unknown")
         )
 
         for person in assignees:
@@ -146,22 +131,20 @@ def run():
                     continue
 
                 week = iso_week(d)
-                sync_key = f"{person['id']}|{week}"
+                sync_key = f"{person['id']}|{week}|Availability"
 
                 payload = {
                     "Name": {
                         "title": [{
                             "text": {
-                                "content": f"{person['id']} | {week}"
+                                "content": f"Availability | {person['id']} | {week}"
                             }
                         }]
                     },
                     "Sync Key": {
                         "rich_text": [{"text": {"content": sync_key}}]
                     },
-                    "Assigned To": {
-                        "people": [{"id": person["id"]}]
-                    },
+                    "Assigned To": {"people": [{"id": person["id"]}]},
                     "ISO Week": {
                         "rich_text": [{"text": {"content": week}}]
                     },
@@ -173,17 +156,12 @@ def run():
                     },
                     "Leave Type": {
                         "select": {"name": leave_type}
-                    } if leave_type else None,
-                    "Client Unavailability": {
-                        "checkbox": True
                     },
+                    "Client Unavailability": {"checkbox": True},
                     "Last Synced At": {
                         "date": {"start": datetime.utcnow().isoformat()}
                     },
                 }
-
-                # remove None fields
-                payload = {k: v for k, v in payload.items() if v is not None}
 
                 existing_id = target_index.get(sync_key)
 
@@ -199,10 +177,9 @@ def run():
                     created += 1
 
     logger.info(
-        "Availability sync completed | created=%d updated=%d skipped=%d",
+        "Availability sync completed | created=%d updated=%d",
         created,
         updated,
-        skipped,
     )
 
 
