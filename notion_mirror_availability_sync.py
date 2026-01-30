@@ -1,6 +1,6 @@
 import os
 import logging
-from datetime import datetime, timedelta, date
+from datetime import date, timedelta, datetime
 from typing import Dict, List
 
 from notion_client import Client
@@ -31,8 +31,17 @@ notion = Client(auth=NOTION_TOKEN)
 # HELPERS
 # ------------------------------------------------------------------
 def iso_week(d: date) -> str:
-    y, w, _ = d.isocalendar()
-    return f"{y}-W{w:02d}"
+    year, week, _ = d.isocalendar()
+    return f"{year}-W{week:02d}"
+
+
+def week_range(start: date, end: date) -> List[str]:
+    weeks = set()
+    cur = start
+    while cur <= end:
+        weeks.add(iso_week(cur))
+        cur += timedelta(days=7)
+    return sorted(weeks)
 
 
 def get_date(prop) -> date | None:
@@ -42,6 +51,12 @@ def get_date(prop) -> date | None:
     if not d or not d.get("start"):
         return None
     return date.fromisoformat(d["start"][:10])
+
+
+def get_formula_string(prop) -> str | None:
+    if not prop or prop.get("type") != "formula":
+        return None
+    return prop.get("formula", {}).get("string")
 
 
 def query_all(db_id: str, filter_payload=None) -> List[Dict]:
@@ -64,7 +79,6 @@ def query_all(db_id: str, filter_payload=None) -> List[Dict]:
 
     return results
 
-
 # ------------------------------------------------------------------
 # MAIN
 # ------------------------------------------------------------------
@@ -73,39 +87,32 @@ def run():
     logger.info("Syncing approved availability from %s onward", cutoff)
 
     # --------------------------------------------------------------
-    # SOURCE QUERY — APPROVED ONLY (FORMULA STRING)
+    # SOURCE QUERY — APPROVED ONLY (FORMULA SAFE)
     # --------------------------------------------------------------
     source_rows = query_all(
         SOURCE_DB_ID,
         filter_payload={
             "property": "Status",
-            "formula": {
-                "string": {"equals": "Approved"}
-            }
+            "formula": {"string": {"equals": "Approved"}},
         },
     )
-
     logger.info("Fetched %d APPROVED source rows", len(source_rows))
 
     # --------------------------------------------------------------
-    # BUILD TARGET INDEX (Sync Key)
+    # TARGET INDEX (Sync Key → Page ID)
     # --------------------------------------------------------------
     target_index: Dict[str, str] = {}
-
     for row in query_all(TARGET_DB_ID):
-        key = (
+        key_prop = (
             row.get("properties", {})
             .get("Sync Key", {})
             .get("rich_text", [])
         )
-        if key:
-            target_index[key[0]["plain_text"]] = row["id"]
+        if key_prop:
+            target_index[key_prop[0]["plain_text"]] = row["id"]
 
     created = updated = skipped = 0
 
-    # --------------------------------------------------------------
-    # PROCESS
-    # --------------------------------------------------------------
     for page in source_rows:
         props = page.get("properties", {})
 
@@ -122,34 +129,29 @@ def run():
             continue
 
         leave_type = (
-            props.get("Leave Type", {})
-            .get("select", {})
-            .get("name")
+            props.get("Reason & Comments", {})
+            .get("title", [{}])[0]
+            .get("plain_text", "Leave")
         )
 
-        for person in people:
-            for i in range((end_date - start_date).days + 1):
-                d = start_date + timedelta(days=i)
-                if d < cutoff:
-                    continue
+        weeks = week_range(start_date, end_date)
 
-                week = iso_week(d)
-                sync_key = f"{person['id']}|{week}"
+        for person in people:
+            for week in weeks:
+                sync_key = f"{page['id']}|{person['id']}|{week}"
 
                 payload = {
                     "Name": {
                         "title": [{
                             "text": {
-                                "content": f"Availability | {person['name']} | {week}"
+                                "content": f"{leave_type} | {person['id']} | {week}"
                             }
                         }]
                     },
                     "Sync Key": {
                         "rich_text": [{"text": {"content": sync_key}}]
                     },
-                    "Assigned To": {
-                        "people": [{"id": person["id"]}]
-                    },
+                    "Assigned To": {"people": [{"id": person["id"]}]},
                     "ISO Week": {
                         "rich_text": [{"text": {"content": week}}]
                     },
@@ -159,18 +161,12 @@ def run():
                     "Leave End Date": {
                         "date": {"start": end_date.isoformat()}
                     },
-                    "Leave Type": (
-                        {"select": {"name": leave_type}}
-                        if leave_type else None
-                    ),
+                    "Leave Type": {"select": {"name": leave_type}},
                     "Client Unavailability": {"checkbox": True},
                     "Last Synced At": {
                         "date": {"start": datetime.utcnow().isoformat()}
                     },
                 }
-
-                # remove None props
-                payload = {k: v for k, v in payload.items() if v is not None}
 
                 existing_id = target_index.get(sync_key)
 
@@ -192,6 +188,6 @@ def run():
         skipped,
     )
 
-
+# ------------------------------------------------------------------
 if __name__ == "__main__":
     run()
