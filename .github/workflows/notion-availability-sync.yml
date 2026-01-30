@@ -15,24 +15,36 @@ jobs:
     timeout-minutes: 10
 
     steps:
+      # ------------------------------------------------------------
+      # Checkout
+      # ------------------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # ------------------------------------------------------------
+      # Python setup
+      # ------------------------------------------------------------
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
+      # ------------------------------------------------------------
+      # Dependencies
+      # ------------------------------------------------------------
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install --no-cache-dir -r requirements.txt
 
+      # ------------------------------------------------------------
+      # Run Notion sync (MODULE SAFE)
+      # ------------------------------------------------------------
       - name: Run Notion sync
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           SOURCE_DB_ID: ${{ secrets.SOURCE_DB_ID }}
           TARGET_DB_ID: ${{ secrets.TARGET_DB_ID }}
           SYNC_LOOKBACK_DAYS: 45
-        run: python notion_mirror_availability_sync.py
-                               
+        run: |
+          python -m notion_mirror_availability_sync
