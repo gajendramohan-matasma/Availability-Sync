@@ -28,19 +28,6 @@ if not all([NOTION_TOKEN, SOURCE_DB_ID, TARGET_DB_ID]):
 notion = Client(auth=NOTION_TOKEN)
 
 # ------------------------------------------------------------------
-# DESTINATION DB PROPERTY NAMES (AUTHORITATIVE)
-# ------------------------------------------------------------------
-P_NAME = "Name"
-P_ASSIGNEE = "Assigned To"
-P_ISO_WEEK = "ISO Week"
-P_START = "Leave Start Date"
-P_END = "Leave End Date"
-P_TYPE = "Leave Type"
-P_FLAG = "Client Unavailability"
-P_SYNC_KEY = "Sync Key"
-P_LAST_SYNC = "Last Synced At"
-
-# ------------------------------------------------------------------
 # HELPERS
 # ------------------------------------------------------------------
 def iso_week(d: date) -> str:
@@ -57,10 +44,21 @@ def get_date(prop) -> date | None:
     return date.fromisoformat(d["start"][:10])
 
 
-def get_formula_string(prop) -> str | None:
-    if not prop or prop.get("type") != "formula":
+def get_status_value(prop) -> str | None:
+    """
+    Read REAL Notion status/select field.
+    Never trust formula output for filtering.
+    """
+    if not prop:
         return None
-    return prop.get("formula", {}).get("string")
+
+    if prop.get("type") == "status":
+        return prop.get("status", {}).get("name")
+
+    if prop.get("type") == "select":
+        return prop.get("select", {}).get("name")
+
+    return None
 
 
 def query_all(db_id: str, filter_payload=None) -> List[Dict]:
@@ -91,21 +89,24 @@ def run():
     cutoff = date.today() - timedelta(days=LOOKBACK_DAYS)
     logger.info("Syncing approved availability from %s onward", cutoff)
 
+    # ---------------------------
+    # SOURCE FETCH (no formula filtering)
+    # ---------------------------
     source_rows = query_all(SOURCE_DB_ID)
     logger.info("Fetched %d source rows", len(source_rows))
 
-    # --------------------------------------------------------------
-    # Build target index (Sync Key → Page ID)
-    # --------------------------------------------------------------
+    # ---------------------------
+    # TARGET INDEX
+    # ---------------------------
     target_index: Dict[str, str] = {}
     for row in query_all(TARGET_DB_ID):
-        key = (
+        uid = (
             row.get("properties", {})
-            .get(P_SYNC_KEY, {})
+            .get("Sync Key", {})
             .get("rich_text", [])
         )
-        if key:
-            target_index[key[0]["plain_text"]] = row["id"]
+        if uid:
+            target_index[uid[0]["plain_text"]] = row["id"]
 
     created = updated = skipped = 0
 
@@ -113,17 +114,17 @@ def run():
         props = page.get("properties", {})
 
         # ----------------------------------------------------------
-        # APPROVED ONLY (FORMULA FIELD)
+        # FILTER: ONLY APPROVED (REAL STATUS FIELD)
         # ----------------------------------------------------------
-        status = get_formula_string(props.get("Status"))
-        if status != "Approved":
+        status_value = get_status_value(props.get("Status"))
+        if status_value != "Approved":
             skipped += 1
             continue
 
-        start = get_date(props.get("Leave Start Date"))
-        end = get_date(props.get("Leave End Date"))
+        start_date = get_date(props.get("Leave Start Date"))
+        end_date = get_date(props.get("Leave End Date"))
 
-        if not start or not end or end < cutoff:
+        if not start_date or not end_date or end_date < cutoff:
             skipped += 1
             continue
 
@@ -139,8 +140,8 @@ def run():
         )
 
         for person in assignees:
-            for i in range((end - start).days + 1):
-                d = start + timedelta(days=i)
+            for offset in range((end_date - start_date).days + 1):
+                d = start_date + timedelta(days=offset)
                 if d < cutoff:
                     continue
 
@@ -148,39 +149,46 @@ def run():
                 sync_key = f"{person['id']}|{week}"
 
                 payload = {
-                    P_NAME: {
+                    "Name": {
                         "title": [{
                             "text": {
-                                "content": f"Availability | {person['id']} | {week}"
+                                "content": f"{person['id']} | {week}"
                             }
                         }]
                     },
-                    P_SYNC_KEY: {
+                    "Sync Key": {
                         "rich_text": [{"text": {"content": sync_key}}]
                     },
-                    P_ASSIGNEE: {"people": [{"id": person["id"]}]},
-                    P_ISO_WEEK: {
+                    "Assigned To": {
+                        "people": [{"id": person["id"]}]
+                    },
+                    "ISO Week": {
                         "rich_text": [{"text": {"content": week}}]
                     },
-                    P_START: {"date": {"start": start.isoformat()}},
-                    P_END: {"date": {"start": end.isoformat()}},
-                    P_TYPE: (
-                        {"select": {"name": leave_type}}
-                        if leave_type else None
-                    ),
-                    P_FLAG: {"checkbox": True},
-                    P_LAST_SYNC: {
+                    "Leave Start Date": {
+                        "date": {"start": start_date.isoformat()}
+                    },
+                    "Leave End Date": {
+                        "date": {"start": end_date.isoformat()}
+                    },
+                    "Leave Type": {
+                        "select": {"name": leave_type}
+                    } if leave_type else None,
+                    "Client Unavailability": {
+                        "checkbox": True
+                    },
+                    "Last Synced At": {
                         "date": {"start": datetime.utcnow().isoformat()}
                     },
                 }
 
-                # remove None properties (Notion rejects them)
+                # remove None fields
                 payload = {k: v for k, v in payload.items() if v is not None}
 
-                existing = target_index.get(sync_key)
+                existing_id = target_index.get(sync_key)
 
-                if existing:
-                    notion.pages.update(page_id=existing, properties=payload)
+                if existing_id:
+                    notion.pages.update(page_id=existing_id, properties=payload)
                     updated += 1
                 else:
                     resp = notion.pages.create(
