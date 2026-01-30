@@ -1,193 +1,173 @@
-from datetime import datetime
-from typing import Dict, Any, List
 import os
+import logging
+from datetime import datetime, timedelta, date
+from typing import Dict, List
 
 from notion_client import Client
 
-from src.logger import logger
-from src.load import upsert, build_master_uid_index
-from src.calendar_utils import iso_week_from_date_str
-from src.config import HOURS_PER_DAY, UNASSIGNED
+# ------------------------------------------------------------------
+# LOGGING (NO src DEPENDENCY)
+# ------------------------------------------------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+# ------------------------------------------------------------------
+# ENV
+# ------------------------------------------------------------------
+NOTION_TOKEN = os.getenv("NOTION_TOKEN")
+SOURCE_DB_ID = os.getenv("SOURCE_DB_ID")
+TARGET_DB_ID = os.getenv("TARGET_DB_ID")
+LOOKBACK_DAYS = int(os.getenv("SYNC_LOOKBACK_DAYS", "45"))
+
+if not all([NOTION_TOKEN, SOURCE_DB_ID, TARGET_DB_ID]):
+    raise RuntimeError("Missing required environment variables")
+
+notion = Client(auth=NOTION_TOKEN)
+
+# ------------------------------------------------------------------
+# HELPERS
+# ------------------------------------------------------------------
+def iso_week(d: date) -> str:
+    year, week, _ = d.isocalendar()
+    return f"{year}-W{week:02d}"
 
 
-# ================================================================
-# NOTION CLIENT
-# ================================================================
-def get_client() -> Client:
-    token = os.getenv("NOTION_TOKEN")
-    if not token:
-        raise RuntimeError("NOTION_TOKEN is required")
-    return Client(auth=token)
-
-
-# ================================================================
-# SAFE PROPERTY EXTRACTORS
-# ================================================================
-def get_date(prop) -> str | None:
-    if not prop or prop.get("type") != "date":
-        return None
-    return prop.get("date", {}).get("start")
-
-
-def get_people_ids(prop) -> List[str]:
-    if not prop or prop.get("type") != "people":
-        return []
-    return [p["id"] for p in prop.get("people", [])]
-
-
-def is_formula_approved(prop) -> bool:
-    """
-    Authoritative approval gate.
-
-    Only returns True if:
-    - Property is a formula
-    - Formula evaluates to 'Approved'
-    """
+def get_formula_string(prop) -> str | None:
     if not prop or prop.get("type") != "formula":
-        return False
-
-    formula = prop.get("formula", {})
-    ftype = formula.get("type")
-
-    if ftype == "string":
-        return formula.get("string") == "Approved"
-
-    if ftype == "select":
-        sel = formula.get("select")
-        return sel and sel.get("name") == "Approved"
-
-    return False
+        return None
+    return prop.get("formula", {}).get("string")
 
 
-# ================================================================
-# NORMALIZE LEAVE PAGE
-# ================================================================
-def normalize_leave(page: Dict[str, Any]) -> List[Dict[str, Any]]:
-    props = page.get("properties", {})
-
-    # ------------------------------------------------------------
-    # DATE (MANDATORY)
-    # ------------------------------------------------------------
-    start_date = get_date(props.get("Leave Start Date"))
-    end_date = get_date(props.get("Leave End Date")) or start_date
-
-    if not start_date:
-        logger.error(
-            "LEAVE_DROPPED_NO_START_DATE: page=%s",
-            page.get("id"),
-        )
-        return []
-
-    # ------------------------------------------------------------
-    # ASSIGNEES
-    # ------------------------------------------------------------
-    assignees = get_people_ids(props.get("Requestor"))
-    if not assignees:
-        assignees = [UNASSIGNED]
-
-    # ------------------------------------------------------------
-    # EXPAND DAYS → WEEKS
-    # ------------------------------------------------------------
-    from datetime import date, timedelta
-
-    start = date.fromisoformat(start_date[:10])
-    end = date.fromisoformat(end_date[:10])
-
-    rows = []
-
-    curr = start
-    while curr <= end:
-        week, week_start = iso_week_from_date_str(curr.isoformat())
-
-        for assignee in assignees:
-            rows.append({
-                "assignee": assignee,
-                "week": week,
-                "week_start": week_start,
-                "customer": "ALL",
-                "project": "ALL",
-                "workstream": "ALL",
-                "metric": "Availability",
-                "value": -HOURS_PER_DAY,
-                "source_page_id": page["id"],
-            })
-
-        curr += timedelta(days=1)
-
-    return rows
+def get_date(prop) -> date | None:
+    if not prop:
+        return None
+    d = prop.get("date")
+    if not d or not d.get("start"):
+        return None
+    return date.fromisoformat(d["start"][:10])
 
 
-# ================================================================
-# MAIN SYNC
-# ================================================================
-def run():
-    db_id = os.getenv("AVAILABILITY_DB_ID")
-    if not db_id:
-        raise RuntimeError("AVAILABILITY_DB_ID must be set")
-
-    notion = get_client()
-    uid_index = build_master_uid_index()
-
-    logger.info("Starting availability sync")
-
-    pages = []
+def query_all(db_id: str, filter_payload=None) -> List[Dict]:
+    results = []
     cursor = None
 
     while True:
-        resp = notion.databases.query(
-            database_id=db_id,
-            start_cursor=cursor,
-        )
-        pages.extend(resp.get("results", []))
-        cursor = resp.get("next_cursor")
-        if not cursor:
+        payload = {"page_size": 100}
+        if cursor:
+            payload["start_cursor"] = cursor
+        if filter_payload:
+            payload["filter"] = filter_payload
+
+        resp = notion.databases.query(database_id=db_id, **payload)
+        results.extend(resp["results"])
+
+        if not resp.get("has_more"):
             break
+        cursor = resp["next_cursor"]
 
-    logger.info("Fetched %d availability requests", len(pages))
+    return results
 
-    approved = 0
-    skipped = 0
 
-    for page in pages:
+# ------------------------------------------------------------------
+# MAIN
+# ------------------------------------------------------------------
+def run():
+    cutoff = date.today() - timedelta(days=LOOKBACK_DAYS)
+    logger.info("Syncing availability from %s onward", cutoff)
+
+    source_rows = query_all(SOURCE_DB_ID)
+    logger.info("Fetched %d source rows", len(source_rows))
+
+    target_index: Dict[str, str] = {}
+    for row in query_all(TARGET_DB_ID):
+        uid = (
+            row.get("properties", {})
+            .get("Source UID", {})
+            .get("rich_text", [])
+        )
+        if uid:
+            target_index[uid[0]["plain_text"]] = row["id"]
+
+    created = updated = skipped = 0
+
+    for page in source_rows:
         props = page.get("properties", {})
 
-        # --------------------------------------------------------
-        # 🔒 APPROVAL GATE (FORMULA-AWARE, AUTHORITATIVE)
-        # --------------------------------------------------------
-        if not is_formula_approved(props.get("Status")):
+        # ----------------------------------------------------------
+        # FILTER: ONLY APPROVED (FORMULA FIELD)
+        # ----------------------------------------------------------
+        status = get_formula_string(props.get("Status"))
+        if status != "Approved":
             skipped += 1
-            logger.debug(
-                "LEAVE_SKIPPED_NOT_APPROVED: page=%s",
-                page.get("id"),
-            )
             continue
 
-        approved += 1
+        start_date = get_date(props.get("Leave Start Date"))
+        end_date = get_date(props.get("Leave End Date"))
 
-        rows = normalize_leave(page)
-        for r in rows:
-            upsert(
-                assignee=r["assignee"],
-                week=r["week"],
-                week_start=r["week_start"],
-                customer=r["customer"],
-                project=r["project"],
-                workstream=r["workstream"],
-                metric=r["metric"],
-                value=r["value"],
-                pages=[r["source_page_id"]],
-                uid_index=uid_index,
-            )
+        if not start_date or not end_date or end_date < cutoff:
+            skipped += 1
+            continue
+
+        assignees = props.get("Requestor", {}).get("people", [])
+        if not assignees:
+            skipped += 1
+            continue
+
+        for person in assignees:
+            for offset in range((end_date - start_date).days + 1):
+                d = start_date + timedelta(days=offset)
+                if d < cutoff:
+                    continue
+
+                week = iso_week(d)
+                source_uid = f"{person['id']}|{week}|Availability"
+
+                payload = {
+                    "Name": {
+                        "title": [{
+                            "text": {
+                                "content": f"Availability | {person['id']} | {week}"
+                            }
+                        }]
+                    },
+                    "Source UID": {
+                        "rich_text": [{"text": {"content": source_uid}}]
+                    },
+                    "Assigned To": {"people": [{"id": person["id"]}]},
+                    "Calendar Week": {
+                        "rich_text": [{"text": {"content": week}}]
+                    },
+                    "Week Start": {"date": {"start": d.isoformat()}},
+                    "Metric Type": {"select": {"name": "Availability"}},
+                    "Value": {"number": 0},
+                    "Last Synced At": {
+                        "date": {"start": datetime.utcnow().isoformat()}
+                    },
+                }
+
+                existing_id = target_index.get(source_uid)
+
+                if existing_id:
+                    notion.pages.update(page_id=existing_id, properties=payload)
+                    updated += 1
+                else:
+                    resp = notion.pages.create(
+                        parent={"database_id": TARGET_DB_ID},
+                        properties=payload,
+                    )
+                    target_index[source_uid] = resp["id"]
+                    created += 1
 
     logger.info(
-        "Availability sync complete | approved=%d skipped=%d",
-        approved,
+        "Availability sync completed | created=%d updated=%d skipped=%d",
+        created,
+        updated,
         skipped,
     )
 
 
-# ================================================================
-# ENTRYPOINT
-# ================================================================
 if __name__ == "__main__":
     run()
