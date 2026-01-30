@@ -6,7 +6,7 @@ from typing import Dict, List
 from notion_client import Client
 
 # ------------------------------------------------------------------
-# LOGGING (NO src DEPENDENCY)
+# LOGGING
 # ------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
@@ -31,8 +31,8 @@ notion = Client(auth=NOTION_TOKEN)
 # HELPERS
 # ------------------------------------------------------------------
 def iso_week(d: date) -> str:
-    year, week, _ = d.isocalendar()
-    return f"{year}-W{week:02d}"
+    y, w, _ = d.isocalendar()
+    return f"{y}-W{w:02d}"
 
 
 def get_date(prop) -> date | None:
@@ -73,37 +73,38 @@ def run():
     logger.info("Syncing approved availability from %s onward", cutoff)
 
     # --------------------------------------------------------------
-    # 🔒 QUERY-LEVEL FILTER (FORMULA SAFE)
+    # SOURCE QUERY — APPROVED ONLY (FORMULA STRING)
     # --------------------------------------------------------------
-    approved_filter = {
-        "property": "Status",
-        "formula": {
-            "string": {
-                "equals": "Approved"
+    source_rows = query_all(
+        SOURCE_DB_ID,
+        filter_payload={
+            "property": "Status",
+            "formula": {
+                "string": {"equals": "Approved"}
             }
-        }
-    }
+        },
+    )
 
-    source_rows = query_all(SOURCE_DB_ID, approved_filter)
     logger.info("Fetched %d APPROVED source rows", len(source_rows))
 
     # --------------------------------------------------------------
     # BUILD TARGET INDEX (Sync Key)
     # --------------------------------------------------------------
     target_index: Dict[str, str] = {}
+
     for row in query_all(TARGET_DB_ID):
-        key_prop = (
+        key = (
             row.get("properties", {})
             .get("Sync Key", {})
             .get("rich_text", [])
         )
-        if key_prop:
-            target_index[key_prop[0]["plain_text"]] = row["id"]
+        if key:
+            target_index[key[0]["plain_text"]] = row["id"]
 
-    created = updated = 0
+    created = updated = skipped = 0
 
     # --------------------------------------------------------------
-    # PROCESS SOURCE ROWS
+    # PROCESS
     # --------------------------------------------------------------
     for page in source_rows:
         props = page.get("properties", {})
@@ -112,39 +113,43 @@ def run():
         end_date = get_date(props.get("Leave End Date"))
 
         if not start_date or not end_date or end_date < cutoff:
+            skipped += 1
             continue
 
-        assignees = props.get("Requestor", {}).get("people", [])
-        if not assignees:
+        people = props.get("Requestor", {}).get("people", [])
+        if not people:
+            skipped += 1
             continue
 
         leave_type = (
             props.get("Leave Type", {})
             .get("select", {})
-            .get("name", "Unknown")
+            .get("name")
         )
 
-        for person in assignees:
-            for offset in range((end_date - start_date).days + 1):
-                d = start_date + timedelta(days=offset)
+        for person in people:
+            for i in range((end_date - start_date).days + 1):
+                d = start_date + timedelta(days=i)
                 if d < cutoff:
                     continue
 
                 week = iso_week(d)
-                sync_key = f"{person['id']}|{week}|Availability"
+                sync_key = f"{person['id']}|{week}"
 
                 payload = {
                     "Name": {
                         "title": [{
                             "text": {
-                                "content": f"Availability | {person['id']} | {week}"
+                                "content": f"Availability | {person['name']} | {week}"
                             }
                         }]
                     },
                     "Sync Key": {
                         "rich_text": [{"text": {"content": sync_key}}]
                     },
-                    "Assigned To": {"people": [{"id": person["id"]}]},
+                    "Assigned To": {
+                        "people": [{"id": person["id"]}]
+                    },
                     "ISO Week": {
                         "rich_text": [{"text": {"content": week}}]
                     },
@@ -154,14 +159,18 @@ def run():
                     "Leave End Date": {
                         "date": {"start": end_date.isoformat()}
                     },
-                    "Leave Type": {
-                        "select": {"name": leave_type}
-                    },
+                    "Leave Type": (
+                        {"select": {"name": leave_type}}
+                        if leave_type else None
+                    ),
                     "Client Unavailability": {"checkbox": True},
                     "Last Synced At": {
                         "date": {"start": datetime.utcnow().isoformat()}
                     },
                 }
+
+                # remove None props
+                payload = {k: v for k, v in payload.items() if v is not None}
 
                 existing_id = target_index.get(sync_key)
 
@@ -177,9 +186,10 @@ def run():
                     created += 1
 
     logger.info(
-        "Availability sync completed | created=%d updated=%d",
+        "Availability sync completed | created=%d updated=%d skipped=%d",
         created,
         updated,
+        skipped,
     )
 
 
