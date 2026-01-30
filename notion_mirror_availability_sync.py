@@ -146,6 +146,10 @@ def run():
         requestor_prop = props.get("Requestor", {})
         requestor_people = requestor_prop.get("people", []) if requestor_prop else []
 
+        # Calculate ISO Week from start date (format: "2026-W05")
+        iso_year, iso_week, _ = start_date.isocalendar()
+        iso_week_str = f"{iso_year}-W{iso_week:02d}"
+
         sync_key = f"{page['id']}|LEAVE"
 
         payload = {
@@ -171,6 +175,7 @@ def run():
                 else None
             ),
             "Client Unavailability": {"checkbox": True},
+            "ISO Week": {"select": {"name": iso_week_str}},
             "Assigned To": (
                 {"people": [{"id": p["id"]} for p in requestor_people]}
                 if requestor_people
