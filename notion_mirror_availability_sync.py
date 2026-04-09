@@ -29,6 +29,8 @@ if not NOTION_TOKEN or not SOURCE_DB_ID or not TARGET_DB_ID:
 
 notion = Client(auth=NOTION_TOKEN)
 
+IST = timezone(timedelta(hours=5, minutes=30))
+
 # ------------------------------------------------------------
 # HELPERS
 # ------------------------------------------------------------
@@ -95,7 +97,7 @@ def query_all(database_id: str, filter_payload=None) -> List[Dict]:
 # MAIN
 # ------------------------------------------------------------
 def run():
-    cutoff = date.today() - timedelta(days=LOOKBACK_DAYS)
+    cutoff = datetime.now(IST).date() - timedelta(days=LOOKBACK_DAYS)
     logger.info("Syncing approved availability from %s onward", cutoff)
 
     # --------------------------------------------------------
@@ -165,7 +167,7 @@ def run():
 
             sync_key = f"{page['id']}|LEAVE"
 
-            now_utc = datetime.now(timezone.utc).isoformat()
+            now_ist = datetime.now(IST).isoformat()
 
             payload = {
                 "Name": {
@@ -197,7 +199,7 @@ def run():
                     else None
                 ),
                 "Last Synced At": {
-                    "date": {"start": now_utc}
+                    "date": {"start": now_ist}
                 },
             }
 
