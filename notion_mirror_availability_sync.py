@@ -1,9 +1,11 @@
 import os
 import logging
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 from typing import Dict, List
 
 from notion_client import Client
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from notion_client.errors import APIResponseError, HTTPResponseError
 
 # ------------------------------------------------------------
 # LOGGING
@@ -45,6 +47,29 @@ def get_date(prop) -> date | None:
     return date.fromisoformat(d["start"][:10])
 
 
+_retry = retry(
+    stop=stop_after_attempt(4),
+    wait=wait_exponential(multiplier=2, min=2, max=16),
+    retry=retry_if_exception_type((APIResponseError, HTTPResponseError)),
+    reraise=True,
+)
+
+
+@_retry
+def _query_page(database_id: str, **payload):
+    return notion.databases.query(database_id=database_id, **payload)
+
+
+@_retry
+def _create_page(**kwargs):
+    return notion.pages.create(**kwargs)
+
+
+@_retry
+def _update_page(**kwargs):
+    return notion.pages.update(**kwargs)
+
+
 def query_all(database_id: str, filter_payload=None) -> List[Dict]:
     results = []
     cursor = None
@@ -56,7 +81,7 @@ def query_all(database_id: str, filter_payload=None) -> List[Dict]:
         if filter_payload:
             payload["filter"] = filter_payload
 
-        resp = notion.databases.query(database_id=database_id, **payload)
+        resp = _query_page(database_id, **payload)
         results.extend(resp["results"])
 
         if not resp.get("has_more"):
@@ -102,97 +127,110 @@ def run():
         if sync_key_prop:
             target_index[sync_key_prop[0]["plain_text"]] = row["id"]
 
-    created = updated = skipped = 0
+    created = updated = skipped = errored = 0
 
     # --------------------------------------------------------
     # PROCESS SOURCE ROWS
     # --------------------------------------------------------
     for page in source_rows:
-        props = page.get("properties", {})
+        try:
+            props = page.get("properties", {})
 
-        start_date = get_date(props.get("Leave Start Date"))
-        end_date = get_date(props.get("Till Date"))  # Source uses "Till Date", not "Leave End Date"
+            start_date = get_date(props.get("Leave Start Date"))
+            end_date = get_date(props.get("Till Date"))  # Source uses "Till Date", not "Leave End Date"
 
-        if not start_date or not end_date or end_date < cutoff:
-            skipped += 1
-            continue
+            if not start_date or not end_date or end_date < cutoff:
+                skipped += 1
+                continue
 
-        leave_type = props.get("Leave Type", {}).get("select", {})
-        leave_type_name = leave_type.get("name") if leave_type else None
+            leave_type = props.get("Leave Type", {}).get("select", {})
+            leave_type_name = leave_type.get("name") if leave_type else None
 
-        # Extract Requestor (person) to map to Assigned To in target
-        requestor_prop = props.get("Requestor", {})
-        requestor_people = requestor_prop.get("people", []) if requestor_prop else []
+            # Extract Requestor (person) to map to Assigned To in target
+            requestor_prop = props.get("Requestor", {})
+            requestor_people = requestor_prop.get("people", []) if requestor_prop else []
 
-        # Extract Client Unavailability from source (it's a formula returning boolean)
-        client_unavail_prop = props.get("Client Unavailability", {})
-        if client_unavail_prop.get("type") == "formula":
-            client_unavailability = client_unavail_prop.get("formula", {}).get("boolean", False)
-        else:
-            client_unavailability = client_unavail_prop.get("checkbox", False)
+            # Extract Client Unavailability from source (it's a formula returning boolean)
+            client_unavail_prop = props.get("Client Unavailability", {})
+            if client_unavail_prop.get("type") == "formula":
+                client_unavailability = bool(
+                    client_unavail_prop.get("formula", {}).get("boolean")
+                )
+            else:
+                client_unavailability = bool(client_unavail_prop.get("checkbox"))
 
-        # Calculate ISO Week from start date (format: "2026-W05")
-        iso_year, iso_week, _ = start_date.isocalendar()
-        iso_week_str = f"{iso_year}-W{iso_week:02d}"
+            # Calculate ISO Week from start date (format: "2026-W05")
+            iso_year, iso_week, _ = start_date.isocalendar()
+            iso_week_str = f"{iso_year}-W{iso_week:02d}"
 
-        sync_key = f"{page['id']}|LEAVE"
+            sync_key = f"{page['id']}|LEAVE"
 
-        payload = {
-            "Name": {
-                "title": [{
-                    "text": {
-                        "content": f"Leave | {start_date} → {end_date}"
-                    }
-                }]
-            },
-            "Sync Key": {
-                "rich_text": [{"text": {"content": sync_key}}]
-            },
-            "Leave Start Date": {
-                "date": {"start": start_date.isoformat()}
-            },
-            "Leave End Date": {
-                "date": {"start": end_date.isoformat()}
-            },
-            "Leave Type": (
-                {"select": {"name": leave_type_name}}
-                if leave_type_name
-                else None
-            ),
-            "Client Unavailability": {"checkbox": client_unavailability},
-            "ISO Week": {"rich_text": [{"text": {"content": iso_week_str}}]},
-            "Assigned To": (
-                {"people": [{"id": p["id"]} for p in requestor_people]}
-                if requestor_people
-                else None
-            ),
-            "Last Synced At": {
-                "date": {"start": datetime.utcnow().isoformat()}
-            },
-        }
+            now_utc = datetime.now(timezone.utc).isoformat()
 
-        # Remove None values (Notion API requirement)
-        payload = {k: v for k, v in payload.items() if v is not None}
+            payload = {
+                "Name": {
+                    "title": [{
+                        "text": {
+                            "content": f"Leave | {start_date} → {end_date}"
+                        }
+                    }]
+                },
+                "Sync Key": {
+                    "rich_text": [{"text": {"content": sync_key}}]
+                },
+                "Leave Start Date": {
+                    "date": {"start": start_date.isoformat()}
+                },
+                "Leave End Date": {
+                    "date": {"start": end_date.isoformat()}
+                },
+                "Leave Type": (
+                    {"select": {"name": leave_type_name}}
+                    if leave_type_name
+                    else None
+                ),
+                "Client Unavailability": {"checkbox": client_unavailability},
+                "ISO Week": {"rich_text": [{"text": {"content": iso_week_str}}]},
+                "Assigned To": (
+                    {"people": [{"id": p["id"]} for p in requestor_people]}
+                    if requestor_people
+                    else None
+                ),
+                "Last Synced At": {
+                    "date": {"start": now_utc}
+                },
+            }
 
-        existing_id = target_index.get(sync_key)
+            # Remove None values (Notion API requirement)
+            payload = {k: v for k, v in payload.items() if v is not None}
 
-        if existing_id:
-            notion.pages.update(page_id=existing_id, properties=payload)
-            updated += 1
-        else:
-            resp = notion.pages.create(
-                parent={"database_id": TARGET_DB_ID},
-                properties=payload,
-            )
-            target_index[sync_key] = resp["id"]
-            created += 1
+            existing_id = target_index.get(sync_key)
+
+            if existing_id:
+                _update_page(page_id=existing_id, properties=payload)
+                updated += 1
+            else:
+                resp = _create_page(
+                    parent={"database_id": TARGET_DB_ID},
+                    properties=payload,
+                )
+                target_index[sync_key] = resp["id"]
+                created += 1
+
+        except Exception:
+            logger.exception("Failed to sync page %s", page.get("id", "unknown"))
+            errored += 1
 
     logger.info(
-        "Availability sync completed | created=%d updated=%d skipped=%d",
+        "Availability sync completed | created=%d updated=%d skipped=%d errored=%d",
         created,
         updated,
         skipped,
+        errored,
     )
+
+    if errored:
+        raise RuntimeError(f"Sync finished with {errored} error(s)")
 
 
 if __name__ == "__main__":
