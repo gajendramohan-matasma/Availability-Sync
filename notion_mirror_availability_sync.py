@@ -129,7 +129,10 @@ def run():
         if sync_key_prop:
             target_index[sync_key_prop[0]["plain_text"]] = row["id"]
 
-    created = updated = skipped = errored = 0
+    created = updated = skipped = errored = archived = 0
+
+    # Track which sync keys are still approved in source
+    active_sync_keys: set[str] = set()
 
     # --------------------------------------------------------
     # PROCESS SOURCE ROWS
@@ -166,6 +169,7 @@ def run():
             iso_week_str = f"{iso_year}-W{iso_week:02d}"
 
             sync_key = f"{page['id']}|LEAVE"
+            active_sync_keys.add(sync_key)
 
             now_ist = datetime.now(IST).isoformat()
 
@@ -223,11 +227,24 @@ def run():
             logger.exception("Failed to sync page %s", page.get("id", "unknown"))
             errored += 1
 
+    # --------------------------------------------------------
+    # ARCHIVE STALE RECORDS (no longer Approved in source)
+    # --------------------------------------------------------
+    for sync_key, target_page_id in target_index.items():
+        if sync_key not in active_sync_keys:
+            try:
+                _update_page(page_id=target_page_id, archived=True)
+                archived += 1
+            except Exception:
+                logger.exception("Failed to archive stale page %s", target_page_id)
+                errored += 1
+
     logger.info(
-        "Availability sync completed | created=%d updated=%d skipped=%d errored=%d",
+        "Availability sync completed | created=%d updated=%d skipped=%d archived=%d errored=%d",
         created,
         updated,
         skipped,
+        archived,
         errored,
     )
 
