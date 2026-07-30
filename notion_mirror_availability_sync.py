@@ -31,6 +31,12 @@ notion = Client(auth=NOTION_TOKEN)
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
+_LEAVE_TYPE_ALIASES = {
+    "Compensatory Off": "Comp Off",
+    "Compensatory Leave": "Comp Off",
+    "Comp off": "Comp Off",
+}
+
 # ------------------------------------------------------------
 # HELPERS
 # ------------------------------------------------------------
@@ -148,8 +154,17 @@ def run():
                 skipped += 1
                 continue
 
-            leave_type = props.get("Leave Type", {}).get("select", {})
-            leave_type_name = leave_type.get("name") if leave_type else None
+            leave_type_prop = props.get("Leave Type", {})
+            if leave_type_prop.get("type") == "formula":
+                leave_type_name = (
+                    leave_type_prop.get("formula", {}).get("string")
+                )
+            else:
+                lt_select = leave_type_prop.get("select", {})
+                leave_type_name = lt_select.get("name") if lt_select else None
+
+            if leave_type_name:
+                leave_type_name = _LEAVE_TYPE_ALIASES.get(leave_type_name, leave_type_name)
 
             # Extract Requestor (person) to map to Assigned To in target
             requestor_prop = props.get("Requestor", {})
