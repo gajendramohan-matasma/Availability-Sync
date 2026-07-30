@@ -147,6 +147,8 @@ def run():
         try:
             props = page.get("properties", {})
 
+            active_sync_keys.add(f"{page['id']}|LEAVE")
+
             start_date = get_date(props.get("Leave Start Date"))
             end_date = get_date(props.get("Till Date"))  # Source uses "Till Date", not "Leave End Date"
 
@@ -184,7 +186,6 @@ def run():
             iso_week_str = f"{iso_year}-W{iso_week:02d}"
 
             sync_key = f"{page['id']}|LEAVE"
-            active_sync_keys.add(sync_key)
 
             now_ist = datetime.now(IST).isoformat()
 
