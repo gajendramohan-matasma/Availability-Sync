@@ -31,6 +31,12 @@ notion = Client(auth=NOTION_TOKEN)
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
+_LEAVE_TYPE_ALIASES = {
+    "Compensatory Off": "Comp Off",
+    "Compensatory Leave": "Comp Off",
+    "Comp off": "Comp Off",
+}
+
 # ------------------------------------------------------------
 # HELPERS
 # ------------------------------------------------------------
@@ -129,7 +135,10 @@ def run():
         if sync_key_prop:
             target_index[sync_key_prop[0]["plain_text"]] = row["id"]
 
-    created = updated = skipped = errored = 0
+    created = updated = skipped = errored = archived = 0
+
+    # Track which sync keys are still approved in source
+    active_sync_keys: set[str] = set()
 
     # --------------------------------------------------------
     # PROCESS SOURCE ROWS
@@ -145,8 +154,17 @@ def run():
                 skipped += 1
                 continue
 
-            leave_type = props.get("Leave Type", {}).get("select", {})
-            leave_type_name = leave_type.get("name") if leave_type else None
+            leave_type_prop = props.get("Leave Type", {})
+            if leave_type_prop.get("type") == "formula":
+                leave_type_name = (
+                    leave_type_prop.get("formula", {}).get("string")
+                )
+            else:
+                lt_select = leave_type_prop.get("select", {})
+                leave_type_name = lt_select.get("name") if lt_select else None
+
+            if leave_type_name:
+                leave_type_name = _LEAVE_TYPE_ALIASES.get(leave_type_name, leave_type_name)
 
             # Extract Requestor (person) to map to Assigned To in target
             requestor_prop = props.get("Requestor", {})
@@ -166,6 +184,7 @@ def run():
             iso_week_str = f"{iso_year}-W{iso_week:02d}"
 
             sync_key = f"{page['id']}|LEAVE"
+            active_sync_keys.add(sync_key)
 
             now_ist = datetime.now(IST).isoformat()
 
@@ -223,11 +242,24 @@ def run():
             logger.exception("Failed to sync page %s", page.get("id", "unknown"))
             errored += 1
 
+    # --------------------------------------------------------
+    # ARCHIVE STALE RECORDS (no longer Approved in source)
+    # --------------------------------------------------------
+    for sync_key, target_page_id in target_index.items():
+        if sync_key not in active_sync_keys:
+            try:
+                _update_page(page_id=target_page_id, archived=True)
+                archived += 1
+            except Exception:
+                logger.exception("Failed to archive stale page %s", target_page_id)
+                errored += 1
+
     logger.info(
-        "Availability sync completed | created=%d updated=%d skipped=%d errored=%d",
+        "Availability sync completed | created=%d updated=%d skipped=%d archived=%d errored=%d",
         created,
         updated,
         skipped,
+        archived,
         errored,
     )
 
