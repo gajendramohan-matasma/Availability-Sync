@@ -45,13 +45,17 @@ def get_formula_string(prop) -> str | None:
     return prop.get("formula", {}).get("string")
 
 
-def get_date(prop) -> date | None:
+def get_date(prop, *, use_end=False) -> date | None:
     if not prop:
         return None
     d = prop.get("date")
-    if not d or not d.get("start"):
+    if not d:
         return None
-    return date.fromisoformat(d["start"][:10])
+    key = "end" if use_end else "start"
+    val = d.get(key) or d.get("start")
+    if not val:
+        return None
+    return date.fromisoformat(val[:10])
 
 
 _retry = retry(
@@ -147,31 +151,38 @@ def run():
 
             active_sync_keys.add(f"{page['id']}|LEAVE")
 
-            start_date = get_date(props.get("Leave Start Date"))
-            end_date = get_date(props.get("Till Date"))  # Source uses "Till Date", not "Leave End Date"
+            start_prop = props.get("Leave Start Date")
+            start_date = get_date(start_prop)
 
-            if not start_date or not end_date:
+            if not start_date:
+                logger.warning("Skipping page %s: missing Leave Start Date", page["id"])
                 skipped += 1
                 continue
 
-            leave_type_prop = props.get("Leave Type", {})
+            end_date = (
+                get_date(props.get("Till Date"))
+                or get_date(start_prop, use_end=True)
+                or start_date
+            )
+
+            leave_type_prop = props.get("Leave Type") or {}
             if leave_type_prop.get("type") == "formula":
                 leave_type_name = (
                     leave_type_prop.get("formula", {}).get("string")
                 )
             else:
-                lt_select = leave_type_prop.get("select", {})
+                lt_select = leave_type_prop.get("select")
                 leave_type_name = lt_select.get("name") if lt_select else None
 
             if leave_type_name:
                 leave_type_name = _LEAVE_TYPE_ALIASES.get(leave_type_name, leave_type_name)
 
-            # Extract Requestor (person) to map to Assigned To in target
-            requestor_prop = props.get("Requestor", {})
-            requestor_people = requestor_prop.get("people", []) if requestor_prop else []
+            requestor_prop = props.get("Requestor") or {}
+            requestor_people = requestor_prop.get("people") or []
+            if not requestor_people:
+                logger.warning("Page %s has no Requestor — Assigned To will be empty", page["id"])
 
-            # Extract Client Unavailability from source (it's a formula returning boolean)
-            client_unavail_prop = props.get("Client Unavailability", {})
+            client_unavail_prop = props.get("Client Unavailability") or {}
             if client_unavail_prop.get("type") == "formula":
                 client_unavailability = bool(
                     client_unavail_prop.get("formula", {}).get("boolean")
