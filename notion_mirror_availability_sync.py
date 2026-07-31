@@ -22,7 +22,6 @@ logger = logging.getLogger(__name__)
 NOTION_TOKEN = os.getenv("NOTION_TOKEN")
 SOURCE_DB_ID = os.getenv("SOURCE_DB_ID")
 TARGET_DB_ID = os.getenv("TARGET_DB_ID")
-LOOKBACK_DAYS = int(os.getenv("SYNC_LOOKBACK_DAYS", "45"))
 
 if not NOTION_TOKEN or not SOURCE_DB_ID or not TARGET_DB_ID:
     raise RuntimeError("Missing required environment variables")
@@ -103,8 +102,7 @@ def query_all(database_id: str, filter_payload=None) -> List[Dict]:
 # MAIN
 # ------------------------------------------------------------
 def run():
-    cutoff = datetime.now(IST).date() - timedelta(days=LOOKBACK_DAYS)
-    logger.info("Syncing approved availability from %s onward", cutoff)
+    logger.info("Syncing all approved availability")
 
     # --------------------------------------------------------
     # SOURCE QUERY — APPROVED ONLY (FORMULA FILTER)
@@ -152,7 +150,7 @@ def run():
             start_date = get_date(props.get("Leave Start Date"))
             end_date = get_date(props.get("Till Date"))  # Source uses "Till Date", not "Leave End Date"
 
-            if not start_date or not end_date or end_date < cutoff:
+            if not start_date or not end_date:
                 skipped += 1
                 continue
 
