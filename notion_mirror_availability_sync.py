@@ -68,7 +68,7 @@ _retry = retry(
 
 @_retry
 def _query_page(database_id: str, **payload):
-    return notion.databases.query(database_id=database_id, **payload)
+    return notion.data_sources.query(data_source_id=database_id, **payload)
 
 
 @_retry
