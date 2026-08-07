@@ -121,7 +121,8 @@ def query_all(database_id: str, filter_payload=None) -> List[Dict]:
         try:
             results.extend(_query_one_ds(ds_id, filter_payload))
         except APIResponseError as e:
-            if "does not exist" in str(e) or "not supported" in str(e):
+            msg = str(e).lower()
+            if "does not exist" in msg or "not supported" in msg or "could not find" in msg:
                 logger.info("Skipping data source %s: %s", ds_id, e)
             else:
                 raise
