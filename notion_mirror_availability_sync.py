@@ -67,8 +67,13 @@ _retry = retry(
 
 
 @_retry
-def _query_page(database_id: str, **payload):
-    return notion.data_sources.query(data_source_id=database_id, **payload)
+def _retrieve_db(database_id: str):
+    return notion.databases.retrieve(database_id=database_id)
+
+
+@_retry
+def _query_ds(data_source_id: str, **payload):
+    return notion.data_sources.query(data_source_id=data_source_id, **payload)
 
 
 @_retry
@@ -81,10 +86,19 @@ def _update_page(**kwargs):
     return notion.pages.update(**kwargs)
 
 
-def query_all(database_id: str, filter_payload=None) -> List[Dict]:
+def _resolve_data_source_ids(database_id: str) -> List[str]:
+    db = _retrieve_db(database_id)
+    ds_list = db.get("data_sources", [])
+    ids = [ds["id"] for ds in ds_list if ds.get("id")]
+    if ids:
+        logger.info("Database %s → %d data source(s): %s", database_id, len(ids), ids)
+        return ids
+    return [database_id]
+
+
+def _query_one_ds(data_source_id: str, filter_payload=None) -> List[Dict]:
     results = []
     cursor = None
-
     while True:
         payload = {"page_size": 100}
         if cursor:
@@ -92,13 +106,25 @@ def query_all(database_id: str, filter_payload=None) -> List[Dict]:
         if filter_payload:
             payload["filter"] = filter_payload
 
-        resp = _query_page(database_id, **payload)
+        resp = _query_ds(data_source_id, **payload)
         results.extend(resp["results"])
 
         if not resp.get("has_more"):
             break
         cursor = resp["next_cursor"]
+    return results
 
+
+def query_all(database_id: str, filter_payload=None) -> List[Dict]:
+    results = []
+    for ds_id in _resolve_data_source_ids(database_id):
+        try:
+            results.extend(_query_one_ds(ds_id, filter_payload))
+        except APIResponseError as e:
+            if "does not exist" in str(e) or "not supported" in str(e):
+                logger.info("Skipping data source %s: %s", ds_id, e)
+            else:
+                raise
     return results
 
 
@@ -107,6 +133,9 @@ def query_all(database_id: str, filter_payload=None) -> List[Dict]:
 # ------------------------------------------------------------
 def run():
     logger.info("Syncing all approved availability")
+
+    target_ds_ids = _resolve_data_source_ids(TARGET_DB_ID)
+    target_ds_id = target_ds_ids[0]
 
     # --------------------------------------------------------
     # SOURCE QUERY — APPROVED ONLY (FORMULA FILTER)
@@ -242,7 +271,7 @@ def run():
                 updated += 1
             else:
                 resp = _create_page(
-                    parent={"database_id": TARGET_DB_ID},
+                    parent={"data_source_id": target_ds_id},
                     properties=payload,
                 )
                 target_index[sync_key] = resp["id"]
